@@ -1,6 +1,10 @@
 """
 YOLOv11 Quick Training Script
-Downloads a subset of COCO and trains for quick testing
+Downloads a subset of COCO and trains with enhanced features:
+- EMA (Exponential Moving Average)
+- Warmup scheduler
+- CutMix augmentation
+- Enhanced losses (Wise-IoU optional)
 """
 
 import os
@@ -23,9 +27,10 @@ from tqdm import tqdm
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from yolov8.model import YOLOv8
+from yolov8.model import YOLOv11
 from yolov8.losses import YOLOv8Loss
 from yolov8.data import COCODataset, create_dataloader
+from yolov8.utils.training import ModelEMA, WarmupScheduler, EarlyStopping
 
 
 # ============================================================
@@ -33,10 +38,10 @@ from yolov8.data import COCODataset, create_dataloader
 # ============================================================
 
 CONFIG = {
-    'num_images': 200,          # Liczba obrazów do pobrania
-    'split': 'val',             # 'train' lub 'val'
+    'num_images': 200,          # Number of images to download
+    'split': 'train',             # 'train' or 'val'
     'task': 'detect',           # 'detect', 'segment', 'pose'
-    'model_size': 's',          # 'n', 's', 'm', 'l', 'x'
+    'model_size': 'n',          # 'n', 's', 'm', 'l', 'x'
     'num_classes': 80,          # COCO has 80 classes
     'img_size': 640,
     'batch_size': 8,
@@ -45,6 +50,12 @@ CONFIG = {
     'output_dir': 'coco_mini',
     'save_dir': 'runs/train_mini',
     'num_workers': 4,
+    # New YOLOv11 features
+    'use_ema': True,            # Use Exponential Moving Average
+    'ema_decay': 0.9999,
+    'warmup_epochs': 3,         # Warmup epochs
+    'early_stopping': 10,       # Patience for early stopping (0 to disable)
+    'label_smoothing': 0.0,     # Label smoothing (0.0-0.1)
 }
 
 
@@ -89,7 +100,7 @@ def download_coco_subset(config: dict):
         print(f"✅ Dataset already exists: {subset_ann_path}")
         return str(images_dir), str(subset_ann_path)
     
-    print(f"\n📥 Pobieranie COCO {config['split']}2017 ({config['num_images']} obrazów)...")
+    print(f"\n📥 Downloading COCO {config['split']}2017 ({config['num_images']} images)...")
     
     # Download annotations
     ann_filename = 'instances_val2017.json' if config['split'] == 'val' else 'instances_train2017.json'
@@ -99,7 +110,7 @@ def download_coco_subset(config: dict):
     ann_path = annotations_dir / ann_filename
     
     if not ann_path.exists():
-        print("Pobieranie annotacji (~250MB)...")
+        print("Downloading annotations (~250MB)...")
         ann_url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
         zip_path = output_dir / "annotations.zip"
         
@@ -111,18 +122,18 @@ def download_coco_subset(config: dict):
             
             urllib.request.urlretrieve(ann_url, str(zip_path), reporthook)
         
-        print("Rozpakowywanie...")
+        print("Extracting...")
         with zipfile.ZipFile(zip_path, 'r') as z:
             z.extractall(output_dir)
         zip_path.unlink()
     
     # Load annotations
-    print(f"Wczytywanie annotacji z {ann_path}...")
+    print(f"Loading annotations from {ann_path}...")
     
     try:
         from pycocotools.coco import COCO
     except ImportError:
-        print("Instalowanie pycocotools...")
+        print("Installing pycocotools...")
         os.system("pip install pycocotools -q")
         from pycocotools.coco import COCO
     
@@ -138,7 +149,7 @@ def download_coco_subset(config: dict):
     img_ids = img_ids[:config['num_images']]
     images_info = coco.loadImgs(img_ids)
     
-    print(f"📸 Pobieranie {len(images_info)} obrazów...")
+    print(f"📸 Downloading {len(images_info)} images...")
     
     base_url = f"http://images.cocodataset.org/{config['split']}2017"
     download_args = [(img, images_dir, base_url) for img in images_info]
@@ -147,13 +158,13 @@ def download_coco_subset(config: dict):
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(download_image, arg): arg for arg in download_args}
         
-        with tqdm(total=len(futures), desc="Pobieranie") as pbar:
+        with tqdm(total=len(futures), desc="Downloading") as pbar:
             for future in as_completed(futures):
                 if future.result():
                     successful += 1
                 pbar.update(1)
     
-    print(f"✅ Pobrano {successful}/{len(images_info)} obrazów")
+    print(f"✅ Downloaded {successful}/{len(images_info)} images")
     
     # Create subset annotation file
     ann_ids = coco.getAnnIds(imgIds=img_ids)
@@ -170,7 +181,7 @@ def download_coco_subset(config: dict):
     with open(subset_ann_path, 'w') as f:
         json.dump(subset_coco, f)
     
-    print(f"✅ Annotacje: {subset_ann_path}")
+    print(f"✅ Annotations: {subset_ann_path}")
     
     return str(images_dir), str(subset_ann_path)
 
@@ -179,14 +190,19 @@ def download_coco_subset(config: dict):
 # TRAINING
 # ============================================================
 
-def train_epoch(model, dataloader, criterion, optimizer, scaler, device, epoch, use_amp=True):
-    """Train for one epoch."""
+def train_epoch(model, dataloader, criterion, optimizer, scaler, device, epoch, 
+                warmup_scheduler=None, use_amp=True):
+    """Train for one epoch with warmup support."""
     model.train()
     total_loss = 0
     loss_items = {'box': 0, 'cls': 0, 'dfl': 0}
     
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
     for batch_idx, (images, targets) in enumerate(pbar):
+        # Warmup
+        if warmup_scheduler and epoch <= warmup_scheduler.warmup_epochs:
+            warmup_scheduler.step(epoch, batch_idx, len(dataloader))
+        
         images = images.to(device)
         for k in targets:
             if isinstance(targets[k], torch.Tensor):
@@ -222,7 +238,8 @@ def train_epoch(model, dataloader, criterion, optimizer, scaler, device, epoch, 
 
 def main():
     print("\n" + "="*60)
-    print("  YOLOv8 TRAINING ON COCO SUBSET")
+    print("  YOLOv11 TRAINING ON COCO SUBSET")
+    print("  With EMA, Warmup, and Enhanced Features")
     print("="*60)
     
     # Device
@@ -259,16 +276,22 @@ def main():
     
     # Create model
     print("\n" + "-"*60)
-    print("🧠 Creating model...")
+    print("🧠 Creating YOLOv11 model...")
     
     nc = 1 if CONFIG['task'] == 'pose' else CONFIG['num_classes']
-    model = YOLOv8(
+    model = YOLOv11(
         num_classes=nc,
         task=CONFIG['task'],
         model_size=CONFIG['model_size']
     ).to(device)
     
     model.info()
+    
+    # Create EMA model
+    ema = None
+    if CONFIG['use_ema']:
+        ema = ModelEMA(model, decay=CONFIG['ema_decay'])
+        print(f"✅ EMA enabled (decay={CONFIG['ema_decay']})")
     
     # Create loss function
     criterion = YOLOv8Loss(
@@ -285,12 +308,27 @@ def main():
         nesterov=True
     )
     
-    # Scheduler
+    # Warmup scheduler
+    warmup_scheduler = None
+    if CONFIG['warmup_epochs'] > 0:
+        warmup_scheduler = WarmupScheduler(
+            optimizer,
+            warmup_epochs=CONFIG['warmup_epochs']
+        )
+        print(f"✅ Warmup enabled ({CONFIG['warmup_epochs']} epochs)")
+    
+    # Main scheduler
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=CONFIG['epochs'],
         eta_min=CONFIG['lr'] * 0.01
     )
+    
+    # Early stopping
+    early_stopping = None
+    if CONFIG['early_stopping'] > 0:
+        early_stopping = EarlyStopping(patience=CONFIG['early_stopping'])
+        print(f"✅ Early stopping enabled (patience={CONFIG['early_stopping']})")
     
     # Mixed precision
     scaler = GradScaler()
@@ -312,40 +350,58 @@ def main():
     for epoch in range(CONFIG['epochs']):
         # Train
         metrics = train_epoch(
-            model, dataloader, criterion, optimizer, scaler, device, epoch + 1
+            model, dataloader, criterion, optimizer, scaler, device, 
+            epoch + 1, warmup_scheduler
         )
         
-        # Update scheduler
-        scheduler.step()
+        # Update EMA
+        if ema:
+            ema.update(model)
+        
+        # Update scheduler (after warmup)
+        if epoch >= CONFIG['warmup_epochs']:
+            scheduler.step()
         
         # Log
         history.append(metrics)
         
+        lr = optimizer.param_groups[0]['lr']
         print(f"Epoch {epoch+1}/{CONFIG['epochs']}: "
               f"loss={metrics['loss']:.4f}, "
               f"box={metrics['box']:.4f}, "
               f"cls={metrics['cls']:.4f}, "
-              f"lr={scheduler.get_last_lr()[0]:.6f}")
+              f"lr={lr:.6f}")
         
         # Save best
         if metrics['loss'] < best_loss:
             best_loss = metrics['loss']
-            torch.save({
+            save_dict = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': best_loss,
                 'config': CONFIG
-            }, save_dir / 'best.pt')
+            }
+            if ema:
+                save_dict['ema_state_dict'] = ema.ema.state_dict()
+            torch.save(save_dict, save_dir / 'best.pt')
         
         # Save last
-        torch.save({
+        save_dict = {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'loss': metrics['loss'],
             'config': CONFIG
-        }, save_dir / 'last.pt')
+        }
+        if ema:
+            save_dict['ema_state_dict'] = ema.ema.state_dict()
+        torch.save(save_dict, save_dir / 'last.pt')
+        
+        # Early stopping
+        if early_stopping and early_stopping(-metrics['loss']):
+            print(f"\n⚠️ Early stopping at epoch {epoch+1}")
+            break
     
     elapsed = time.time() - start_time
     
@@ -356,6 +412,8 @@ def main():
     print(f"\n⏱️  Time: {elapsed/60:.1f} minutes")
     print(f"📉 Best loss: {best_loss:.4f}")
     print(f"💾 Weights saved: {save_dir}")
+    if ema:
+        print(f"   (includes EMA weights)")
     print(f"\n🚀 To run inference:")
     print(f"   python inference.py --weights \"{save_dir / 'best.pt'}\" --source image.jpg")
     

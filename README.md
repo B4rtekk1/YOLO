@@ -1,190 +1,233 @@
-# YOLOv8 From Scratch
+# YOLOv11 From Scratch
 
-Implementacja YOLOv8 od zera w PyTorch, wspierająca:
+A complete PyTorch implementation of YOLOv11 object detection from scratch, with additional enhancements for training, optimization, and deployment.
 
-- **Detection** - wykrywanie obiektów (80 klas COCO)
-- **Segmentation** - segmentacja instancyjna
-- **Pose Estimation** - wykrywanie szkieletu człowieka (17 keypoints COCO)
+## Supported Tasks
 
-## 📁 Struktura projektu
+- **Detection** - Object detection (80 COCO classes)
+- **Segmentation** - Instance segmentation
+- **Pose Estimation** - Human keypoint detection (17 COCO keypoints)
+
+## Project Structure
 
 ```
 YOLO/
 ├── yolov8/
-│   ├── __init__.py          # Package exports
-│   ├── blocks.py             # Basic blocks: Conv, C2f, SPPF, DFL
-│   ├── backbone.py           # CSPDarknet backbone
-│   ├── neck.py               # PANet/FPN neck
-│   ├── head.py               # Detection/Segmentation/Pose heads
-│   ├── model.py              # Main YOLOv8 model
-│   ├── losses/               # Loss functions
-│   │   ├── box_loss.py       # CIoU, DFL losses
-│   │   ├── cls_loss.py       # Classification losses
-│   │   ├── seg_loss.py       # Segmentation losses
-│   │   ├── pose_loss.py      # OKS, keypoint losses
-│   │   └── combined_loss.py  # Task-Aligned Assigner
-│   ├── data/                 # Data loading
-│   │   ├── dataset.py        # COCO/YOLO format loaders
-│   │   └── augmentations.py  # Mosaic, MixUp, etc.
-│   └── utils/                # Utilities
-│       ├── nms.py            # Non-Maximum Suppression
-│       ├── metrics.py        # mAP, OKS metrics
-│       └── visualization.py  # Drawing functions
-├── train.py                  # Training script
-├── inference.py              # Inference script
-└── requirements.txt          # Dependencies
+│   ├── __init__.py              # Package exports
+│   ├── blocks.py                # C3k2, C2PSA, SPPF, Attention, DFL
+│   ├── backbone.py              # CSPDarknet + C2PSA attention
+│   ├── neck.py                  # PANet with C3k2 blocks
+│   ├── head.py                  # Detection/Segmentation/Pose heads
+│   ├── model.py                 # YOLOv11 model class
+│   │
+│   ├── losses/
+│   │   ├── box_loss.py          # CIoU, DFL losses
+│   │   ├── cls_loss.py          # BCE, Focal losses
+│   │   ├── combined_loss.py     # Task-Aligned Assigner
+│   │   └── enhanced_loss.py     # Wise-IoU, Quality Focal Loss
+│   │
+│   ├── data/
+│   │   ├── dataset.py           # COCO/YOLO loaders
+│   │   └── augmentations.py     # Mosaic, MixUp, CutMix
+│   │
+│   └── utils/
+│       ├── training.py          # EMA, schedulers
+│       ├── pruning.py           # Model compression
+│       └── export.py            # ONNX, TensorRT, quantization
+│
+├── train_quick.py               # Quick training script
+├── train.py                     # Full training script
+└── inference.py                 # Inference script
 ```
 
-## 🚀 Instalacja
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 🎯 Użycie
-
-### Tworzenie modelu
+## Quick Start
 
 ```python
-from yolov8 import YOLOv8
+from yolov8 import YOLOv11
 
-# Detection
-model = YOLOv8(num_classes=80, task='detect', model_size='s')
-
-# Segmentation
-model = YOLOv8(num_classes=80, task='segment', model_size='s')
-
-# Pose Estimation
-model = YOLOv8(num_classes=1, task='pose', model_size='s')
+# Create model
+model = YOLOv11(num_classes=80, task='detect', model_size='s')
 
 # Forward pass
 import torch
 x = torch.randn(1, 3, 640, 640)
 outputs = model(x)
-model.info()
 ```
 
-### Trenowanie
-
 ```bash
-# Detection na COCO
-python train.py --task detect --model s --data /path/to/coco/images \
-    --ann /path/to/annotations.json --epochs 100 --batch 16
-
-# Segmentation
-python train.py --task segment --model s --data /path/to/data \
-    --ann annotations_seg.json --epochs 100
-
-# Pose Estimation
-python train.py --task pose --model s --data /path/to/data \
-    --ann annotations_pose.json --epochs 100
+# Quick training on COCO subset
+python train_quick.py
 ```
 
-### Inference
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph Input
+        IMG[Input 640x640x3]
+    end
+    
+    subgraph Backbone["BACKBONE (CSPDarknet)"]
+        STEM[Stem Conv]
+        S1[Stage 1<br/>C3k2]
+        S2[Stage 2<br/>C3k2]
+        S3[Stage 3<br/>C3k2]
+        S4[Stage 4<br/>C3k2 + SPPF]
+        PSA[C2PSA<br/>Spatial Attention]
+        
+        STEM --> S1 --> S2 --> S3 --> S4 --> PSA
+    end
+    
+    subgraph Neck["NECK (PANet)"]
+        direction TB
+        FPN["FPN (Top-Down)<br/>C3k2 blocks"]
+        PAN["PAN (Bottom-Up)<br/>C3k2 blocks"]
+        FPN --> PAN
+    end
+    
+    subgraph Head["HEAD (Decoupled)"]
+        CLS[Classification<br/>Branch]
+        REG[Regression<br/>Branch]
+        TASK[Task-Specific<br/>Mask/Keypoints]
+    end
+    
+    subgraph Enhancements["ENHANCEMENTS"]
+        LOSS[Enhanced Losses<br/>Wise-IoU, QFL]
+        TRAIN[Training Utils<br/>EMA, Warmup]
+        OPT[Optimization<br/>Pruning, Quantization]
+    end
+    
+    IMG --> Backbone
+    S2 -->|P3| Neck
+    S3 -->|P4| Neck
+    PSA -->|P5| Neck
+    Neck --> Head
+    Head -.-> LOSS
+    Head -.-> TRAIN
+    Head -.-> OPT
+```
+
+## Comparison: YOLOv11 vs This Implementation
+
+| Feature | Standard YOLOv11 | This Implementation |
+|---------|------------------|---------------------|
+| **Architecture** | | |
+| CSP Block | C3k2 | C3k2 |
+| Spatial Attention | C2PSA | C2PSA |
+| Neck | PANet | PANet with C3k2 |
+| **Loss Functions** | | |
+| Box Loss | CIoU + DFL | CIoU + DFL + Wise-IoU |
+| Classification | BCE | BCE + Quality Focal Loss |
+| Label Smoothing | No | Yes (configurable) |
+| **Training** | | |
+| EMA | Yes | Yes (ModelEMA) |
+| Warmup | Linear | Linear + Cosine |
+| Progressive Resize | No | Yes |
+| Early Stopping | No | Yes |
+| **Augmentation** | | |
+| Mosaic | Yes | Yes |
+| MixUp | Yes | Yes |
+| CutMix | No | Yes |
+| CopyPaste | Limited | Yes |
+| **Optimization** | | |
+| Pruning | No | Structured/Unstructured/Global |
+| ONNX Export | Yes | Yes |
+| TensorRT | Separate | Integrated (optional) |
+| INT8 Quantization | Separate | Integrated (optional) |
+
+## Model Variants
+
+| Model | Parameters | FLOPs | mAP (COCO) |
+|-------|------------|-------|------------|
+| YOLOv11n | 5.3M | 6.5G | ~39.5 |
+| YOLOv11s | 21.0M | 28G | ~47.0 |
+| YOLOv11m | 26M | 79G | ~51.5 |
+| YOLOv11l | 44M | 165G | ~53.4 |
+| YOLOv11x | 68M | 258G | ~54.7 |
+
+## Key Components
+
+### Building Blocks
+
+| Block | Description |
+|-------|-------------|
+| C3k2 | Faster CSP bottleneck (replaces C2f) |
+| C2PSA | Cross Stage Partial with Spatial Attention |
+| Attention | Multi-head self-attention module |
+| SPPF | Spatial Pyramid Pooling Fast |
+| DFL | Distribution Focal Loss head |
+
+### Training Enhancements
+
+```python
+from yolov8.utils import ModelEMA, ProgressiveResizing
+
+# EMA for stable weights
+ema = ModelEMA(model, decay=0.9999)
+
+# Progressive image sizing
+resizer = ProgressiveResizing(start_size=320, end_size=640)
+```
+
+### Model Optimization
+
+```python
+from yolov8.utils import global_pruning, export_onnx
+
+# Prune 30% of weights
+pruned = global_pruning(model, amount=0.3)
+
+# Export to ONNX
+export_onnx(model, "model.onnx")
+```
+
+## Training
+
+### Quick Training (COCO subset)
 
 ```bash
-# Na obrazie
-python inference.py --weights runs/train/best.pt --source image.jpg --task detect
+python train_quick.py
+```
 
-# Na video
-python inference.py --weights runs/train/best.pt --source video.mp4 --task detect
+Configuration in `train_quick.py`:
+
+```python
+CONFIG = {
+    'model_size': 'n',        # n, s, m, l, x
+    'epochs': 20,
+    'batch_size': 8,
+    'use_ema': True,
+    'warmup_epochs': 3,
+    'early_stopping': 10,
+}
+```
+
+### Full Training
+
+```bash
+python train.py --task detect --model s --data /path/to/images \
+    --ann annotations.json --epochs 100 --batch 16
+```
+
+## Inference
+
+```bash
+# Image
+python inference.py --weights best.pt --source image.jpg
+
+# Video
+python inference.py --weights best.pt --source video.mp4
 
 # Webcam
-python inference.py --weights runs/train/best.pt --source 0 --task detect
+python inference.py --weights best.pt --source 0
 ```
 
-## 📐 Architektura YOLOv8
-
-```
-Input (640x640x3)
-    │
-    ▼
-┌─────────────────────────────────────────────────┐
-│                  BACKBONE (CSPDarknet)          │
-├─────────────────────────────────────────────────┤
-│  Stem → Stage1 → Stage2 → Stage3 → Stage4       │
-│  Conv    C2f      C2f      C2f     C2f+SPPF    │
-│                     │        │         │        │
-│                    P3       P4        P5        │
-│                 (80x80)  (40x40)   (20x20)      │
-└─────────────────────────────────────────────────┘
-                     │        │         │
-                     ▼        ▼         ▼
-┌─────────────────────────────────────────────────┐
-│                  NECK (PANet)                   │
-├─────────────────────────────────────────────────┤
-│  FPN (Top-Down):    P5 → N4 → N3               │
-│  PAN (Bottom-Up):   N3 → N4 → N5               │
-└─────────────────────────────────────────────────┘
-                     │        │         │
-                     ▼        ▼         ▼
-┌─────────────────────────────────────────────────┐
-│              HEAD (Decoupled)                   │
-├─────────────────────────────────────────────────┤
-│  Classification branch: Conv → Conv → Pred     │
-│  Regression branch:     Conv → Conv → Pred     │
-│  + Mask coefficients (segment)                 │
-│  + Keypoints (pose)                            │
-└─────────────────────────────────────────────────┘
-```
-
-## 📊 Rozmiary modeli
-
-| Model    | Params  | FLOPs   | Input |
-|----------|---------|---------|-------|
-| YOLOv8n  | ~3.2M   | ~8.7G   | 640   |
-| YOLOv8s  | ~11.2M  | ~28.6G  | 640   |
-| YOLOv8m  | ~25.9M  | ~78.9G  | 640   |
-| YOLOv8l  | ~43.7M  | ~165.2G | 640   |
-| YOLOv8x  | ~68.2M  | ~257.8G | 640   |
-
-## 🔧 Kluczowe komponenty
-
-### Bloki budulcowe
-
-- **Conv**: Conv2D + BatchNorm + SiLU
-- **C2f**: Cross Stage Partial with 2 convolutions (szybsza wersja C3)
-- **SPPF**: Spatial Pyramid Pooling Fast
-- **DFL**: Distribution Focal Loss dla regresji box
-
-### Loss Functions
-
-- **CIoU Loss**: Complete IoU dla regresji bounding box
-- **DFL**: Distribution Focal Loss
-- **BCE/Focal/Varifocal**: Klasyfikacja
-- **OKS Loss**: Object Keypoint Similarity dla pose
-
-### Augmentacje
-
-- **Mosaic**: Łączy 4 obrazy w jeden
-- **MixUp**: Mieszanie dwóch obrazów
-- **RandomHSV**: Modyfikacja barw
-- **RandomFlip**: Odbicie lustrzane
-
-## 📚 COCO Keypoints (17 punktów)
-
-```
-Keypoint ID | Nazwa         | Połączenie
-------------|---------------|------------
-0           | nose          | 
-1           | left_eye      | 0-1
-2           | right_eye     | 0-2
-3           | left_ear      | 1-3
-4           | right_ear     | 2-4
-5           | left_shoulder | 5-6, 5-7, 5-11
-6           | right_shoulder| 6-8, 6-12
-7           | left_elbow    | 7-9
-8           | right_elbow   | 8-10
-9           | left_wrist    | 
-10          | right_wrist   | 
-11          | left_hip      | 11-12, 11-13
-12          | right_hip     | 12-14
-13          | left_knee     | 13-15
-14          | right_knee    | 14-16
-15          | left_ankle    | 
-16          | right_ankle   | 
-```
-
-## 📝 Licencja
+## License
 
 MIT License

@@ -180,3 +180,120 @@ class ToTensor:
             if isinstance(v, np.ndarray):
                 labels[k] = torch.from_numpy(v)
         return image, labels
+
+
+class CutMix:
+    """
+    CutMix augmentation for object detection.
+    
+    Cuts a random patch from one image and pastes it onto another,
+    mixing labels proportionally.
+    """
+    
+    def __init__(self, p: float = 0.5, beta: float = 1.0):
+        self.p = p
+        self.beta = beta
+    
+    def __call__(self, img1, labels1, img2, labels2):
+        if random.random() > self.p:
+            return img1, labels1
+        
+        h, w = img1.shape[:2]
+        
+        # Sample lambda from beta distribution
+        lam = np.random.beta(self.beta, self.beta)
+        
+        # Calculate cut size
+        cut_rat = np.sqrt(1.0 - lam)
+        cut_w = int(w * cut_rat)
+        cut_h = int(h * cut_rat)
+        
+        # Random center
+        cx = np.random.randint(w)
+        cy = np.random.randint(h)
+        
+        # Cut region
+        bbx1 = np.clip(cx - cut_w // 2, 0, w)
+        bby1 = np.clip(cy - cut_h // 2, 0, h)
+        bbx2 = np.clip(cx + cut_w // 2, 0, w)
+        bby2 = np.clip(cy + cut_h // 2, 0, h)
+        
+        # Apply cutmix
+        img = img1.copy()
+        img[bby1:bby2, bbx1:bbx2] = img2[bby1:bby2, bbx1:bbx2]
+        
+        # Merge labels - keep boxes that are still mostly visible
+        labels = {}
+        if 'bboxes' in labels1 and 'bboxes' in labels2:
+            # Filter boxes from img1 (keep if not in cut region)
+            boxes1 = labels1['bboxes'].copy()
+            keep1 = []
+            for i, box in enumerate(boxes1):
+                # Check if box is mostly outside cut region
+                box_area = (box[2] - box[0]) * (box[3] - box[1])
+                inter_x1 = max(box[0], bbx1)
+                inter_y1 = max(box[1], bby1)
+                inter_x2 = min(box[2], bbx2)
+                inter_y2 = min(box[3], bby2)
+                inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+                if inter_area < 0.5 * box_area:  # Keep if <50% covered
+                    keep1.append(i)
+            
+            # Filter boxes from img2 (keep if in cut region)
+            boxes2 = labels2['bboxes'].copy()
+            keep2 = []
+            for i, box in enumerate(boxes2):
+                # Check if box is mostly inside cut region
+                box_area = (box[2] - box[0]) * (box[3] - box[1])
+                inter_x1 = max(box[0], bbx1)
+                inter_y1 = max(box[1], bby1)
+                inter_x2 = min(box[2], bbx2)
+                inter_y2 = min(box[3], bby2)
+                inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+                if inter_area > 0.5 * box_area:  # Keep if >50% inside
+                    keep2.append(i)
+            
+            # Concatenate labels
+            kept_boxes1 = boxes1[keep1] if len(keep1) > 0 else np.zeros((0, 4))
+            kept_boxes2 = boxes2[keep2] if len(keep2) > 0 else np.zeros((0, 4))
+            kept_labels1 = labels1['labels'][keep1] if len(keep1) > 0 else np.array([])
+            kept_labels2 = labels2['labels'][keep2] if len(keep2) > 0 else np.array([])
+            
+            labels['bboxes'] = np.concatenate([kept_boxes1, kept_boxes2]) if len(kept_boxes1) + len(kept_boxes2) > 0 else np.zeros((0, 4))
+            labels['labels'] = np.concatenate([kept_labels1, kept_labels2]) if len(kept_labels1) + len(kept_labels2) > 0 else np.array([])
+        
+        return img, labels
+
+
+class CopyPaste:
+    """
+    Copy-Paste augmentation for instance segmentation.
+    
+    Copies instances from one image and pastes them onto another.
+    """
+    
+    def __init__(self, p: float = 0.5):
+        self.p = p
+    
+    def __call__(self, img1, labels1, img2, labels2):
+        if random.random() > self.p or 'masks' not in labels2:
+            return img1, labels1
+        
+        # Simple implementation: copy random instances
+        h, w = img1.shape[:2]
+        n_instances = len(labels2.get('masks', []))
+        
+        if n_instances == 0:
+            return img1, labels1
+        
+        # Copy up to 3 random instances
+        n_copy = min(3, n_instances)
+        indices = random.sample(range(n_instances), n_copy)
+        
+        for idx in indices:
+            mask = labels2['masks'][idx]
+            # Paste instance
+            img1[mask > 0] = img2[mask > 0]
+        
+        return img1, labels1
+
