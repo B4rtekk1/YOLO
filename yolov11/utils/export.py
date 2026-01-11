@@ -8,7 +8,8 @@ Note: TensorRT requires tensorrt package installed separately.
 
 import torch
 import torch.nn as nn
-from typing import Tuple, Optional, Dict, Any
+import numpy as np
+from typing import Tuple, Optional, Dict, Any, List
 from pathlib import Path
 import warnings
 
@@ -18,7 +19,7 @@ def export_onnx(
     save_path: str,
     input_size: Tuple[int, int] = (640, 640),
     batch_size: int = 1,
-    opset_version: int = 12,
+    opset_version: int = 17,
     dynamic_axes: bool = False,
     simplify: bool = True
 ) -> str:
@@ -137,7 +138,11 @@ def export_tensorrt(
     
     # Configure builder
     config = builder.create_builder_config()
-    config.max_workspace_size = workspace_size * (1 << 30)  # GB to bytes
+    # TRT 10.0+ uses set_memory_pool_limit instead of max_workspace_size
+    if hasattr(config, 'set_memory_pool_limit'):
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_size * (1 << 30))
+    else:
+        config.max_workspace_size = workspace_size * (1 << 30)
     
     if fp16:
         config.set_flag(trt.BuilderFlag.FP16)
@@ -148,18 +153,98 @@ def export_tensorrt(
             config.int8_calibrator = calibrator
     
     # Build engine
-    engine = builder.build_engine(network, config)
-    
-    if engine is None:
-        raise RuntimeError("Failed to build TensorRT engine")
-    
-    # Save engine
-    save_path = Path(save_path).with_suffix('.engine')
-    with open(save_path, 'wb') as f:
-        f.write(engine.serialize())
+    # TRT 10.0+ uses build_serialized_network instead of build_engine
+    if hasattr(builder, 'build_serialized_network'):
+        engine = builder.build_serialized_network(network, config)
+        if engine is None:
+            raise RuntimeError("Failed to build TensorRT engine")
+        
+        # Save engine (it's already serialized)
+        save_path = Path(save_path).with_suffix('.engine')
+        with open(save_path, 'wb') as f:
+            f.write(engine)
+    else:
+        engine = builder.build_engine(network, config)
+        if engine is None:
+            raise RuntimeError("Failed to build TensorRT engine")
+            
+        # Save engine
+        save_path = Path(save_path).with_suffix('.engine')
+        with open(save_path, 'wb') as f:
+            f.write(engine.serialize())
     
     print(f"TensorRT engine exported to: {save_path}")
     return str(save_path)
+
+
+class TRTInference:
+    """Helper class for TensorRT engine inference (Compatible with TRT 10.x)."""
+    
+    def __init__(self, engine_path: str):
+        import tensorrt as trt
+        import pycuda.driver as cuda
+        import pycuda.autoinit  # Required for CUDA context
+        
+        self.logger = trt.Logger(trt.Logger.INFO)
+        with open(engine_path, 'rb') as f:
+            self.runtime = trt.Runtime(self.logger)
+            self.engine = self.runtime.deserialize_cuda_engine(f.read())
+            self.context = self.engine.create_execution_context()
+            
+        self.inputs, self.outputs = [], []
+        self.input_names, self.output_names = [], []
+        self.stream = cuda.Stream()
+        
+        # TRT 10.x uses tensor names instead of indices
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            is_input = self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT
+            
+            shape = self.engine.get_tensor_shape(name)
+            dtype = trt.nptype(self.engine.get_tensor_dtype(name))
+            
+            # Host and Device buffers
+            size = trt.volume(shape)
+            host_mem = cuda.pagelocked_empty(size, dtype)
+            device_mem = cuda.mem_alloc(host_mem.nbytes)
+            
+            # Bind tensor address
+            self.context.set_tensor_address(name, int(device_mem))
+            
+            if is_input:
+                self.input_names.append(name)
+                self.inputs.append({'host': host_mem, 'device': device_mem, 'name': name, 'shape': shape})
+            else:
+                self.output_names.append(name)
+                self.outputs.append({'host': host_mem, 'device': device_mem, 'name': name, 'shape': shape})
+                
+    def __call__(self, img: torch.Tensor) -> List[torch.Tensor]:
+        import pycuda.driver as cuda
+        # Copy input to host
+        input_data = self.inputs[0]
+        np_img = img.cpu().numpy().astype(input_data['host'].dtype)
+        np.copyto(input_data['host'], np_img.ravel())
+        
+        # Transfer to device, execute, transfer back
+        cuda.memcpy_htod_async(input_data['device'], input_data['host'], self.stream)
+        
+        # TRT 10.x uses execute_async_v3
+        if hasattr(self.context, 'execute_async_v3'):
+            self.context.execute_async_v3(stream_handle=self.stream.handle)
+        else:
+            # Fallback for older versions (unlikely if we reached here with 10.x logic)
+            bindings = [int(i['device']) for i in self.inputs] + [int(o['device']) for o in self.outputs]
+            self.context.execute_async_v2(bindings=bindings, stream_handle=self.stream.handle)
+            
+        for out in self.outputs:
+            cuda.memcpy_dtoh_async(out['host'], out['device'], self.stream)
+        self.stream.synchronize()
+        
+        # Convert back to torch tensors
+        results = []
+        for out in self.outputs:
+            results.append(torch.from_numpy(out['host'].reshape(out['shape'])))
+        return results
 
 
 class QuantizationConfig:
@@ -292,7 +377,7 @@ def get_model_size(model: nn.Module) -> Dict[str, float]:
 
 
 if __name__ == "__main__":
-    from yolov8.model import YOLOv11
+    from yolov11.model import YOLOv11
     
     print("Testing export utilities...")
     

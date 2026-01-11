@@ -1,5 +1,5 @@
 """
-Visualization Utilities for YOLOv8
+Visualization Utilities for YOLOv11
 """
 
 import cv2

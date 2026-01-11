@@ -40,7 +40,7 @@ class ModelEMA:
             tau: Time constant for decay warmup
             updates: Initial update count
         """
-        self.ema = copy.deepcopy(model).eval()
+        self.ema: nn.Module = copy.deepcopy(model).eval()
         self.updates = updates
         self.decay = decay
         self.tau = tau
@@ -57,8 +57,10 @@ class ModelEMA:
             # Decay with warmup
             d = self.decay * (1 - math.exp(-self.updates / self.tau))
             
-            # Update EMA weights
-            msd = model.state_dict()
+            # Use unwrapped model state dict to avoid DDP prefixes
+            model_to_update = model.module if hasattr(model, 'module') else model
+            msd = model_to_update.state_dict()
+            
             for k, v in self.ema.state_dict().items():
                 if v.dtype.is_floating_point:
                     v *= d
@@ -216,7 +218,7 @@ class EarlyStopping:
 
 if __name__ == "__main__":
     # Test utilities
-    from yolov8.model import YOLOv11
+    from yolov11.model import YOLOv11
     
     print("Testing training utilities...")
     

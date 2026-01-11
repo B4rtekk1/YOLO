@@ -1,5 +1,5 @@
 """
-YOLOv8 Data Package
+YOLOv11 Data Package
 Dataset loaders and augmentations
 """
 

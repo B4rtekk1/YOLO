@@ -1,5 +1,5 @@
 """
-Box Regression Losses for YOLOv8
+Box Regression Losses for YOLOv11
 Implements CIoU Loss and Distribution Focal Loss (DFL)
 """
 
@@ -217,7 +217,7 @@ class DFLoss(nn.Module):
 
 class BboxLoss(nn.Module):
     """
-    Combined Box Loss for YOLOv8.
+    Combined Box Loss for YOLOv11.
     
     Combines:
     - CIoU Loss for decoded boxes

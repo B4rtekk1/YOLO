@@ -12,7 +12,7 @@ A complete PyTorch implementation of YOLOv11 object detection from scratch, with
 
 ```
 YOLO/
-├── yolov8/
+├── yolov11/
 │   ├── __init__.py              # Package exports
 │   ├── blocks.py                # C3k2, C2PSA, SPPF, Attention, DFL
 │   ├── backbone.py              # CSPDarknet + C2PSA attention
@@ -49,7 +49,7 @@ pip install -r requirements.txt
 ## Quick Start
 
 ```python
-from yolov8 import YOLOv11
+from yolov11 import YOLOv11
 
 # Create model
 model = YOLOv11(num_classes=80, task='detect', model_size='s')
@@ -166,7 +166,7 @@ flowchart TB
 ### Training Enhancements
 
 ```python
-from yolov8.utils import ModelEMA, ProgressiveResizing
+from yolov11.utils import ModelEMA, ProgressiveResizing
 
 # EMA for stable weights
 ema = ModelEMA(model, decay=0.9999)
@@ -178,7 +178,7 @@ resizer = ProgressiveResizing(start_size=320, end_size=640)
 ### Model Optimization
 
 ```python
-from yolov8.utils import global_pruning, export_onnx
+from yolov11.utils import global_pruning, export_onnx
 
 # Prune 30% of weights
 pruned = global_pruning(model, amount=0.3)

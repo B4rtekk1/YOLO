@@ -1,5 +1,5 @@
 """
-Evaluation Metrics for YOLOv8
+Evaluation Metrics for YOLOv11
 """
 
 import torch
@@ -45,7 +45,7 @@ def compute_ap_per_class(
     pred_cls: np.ndarray,
     target_cls: np.ndarray,
     eps: float = 1e-16
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute AP for each class.
     
@@ -183,37 +183,131 @@ class ConfusionMatrix:
         return self.matrix[self.nc, :self.nc]
 
 
+def match_predictions(
+    pred_boxes: torch.Tensor,
+    pred_cls: torch.Tensor,
+    pred_conf: torch.Tensor,
+    gt_boxes: torch.Tensor,
+    gt_cls: torch.Tensor,
+    iou_thresholds: torch.Tensor
+) -> torch.Tensor:
+    """
+    Match predictions to ground truth across multiple IoU thresholds.
+    
+    Args:
+        pred_boxes: (N, 4)
+        pred_cls: (N,)
+        pred_conf: (N,)
+        gt_boxes: (M, 4)
+        gt_cls: (M,)
+        iou_thresholds: (T,) e.g., [0.5, 0.55, ..., 0.95]
+        
+    Returns:
+        tp: (N, T) boolean matrix of true positives for each threshold
+    """
+    num_preds = pred_boxes.shape[0]
+    num_thresholds = iou_thresholds.shape[0]
+    tp = torch.zeros(num_preds, num_thresholds, dtype=torch.bool, device=pred_boxes.device)
+    
+    if gt_boxes.shape[0] == 0:
+        return tp
+        
+    iou = compute_iou(pred_boxes, gt_boxes)
+    
+    # Correct classes mask
+    correct_cls = (pred_cls[:, None] == gt_cls[None, :])
+    
+    for i, threshold in enumerate(iou_thresholds):
+        # IoU > threshold AND correct class
+        matches = (iou > threshold) & correct_cls
+        
+        if matches.any():
+            # For each prediction, find best matching GT
+            # To handle multiple predictions for same GT, we'd need more complex matching
+            # but for validation metrics, "best first" is common.
+            # Simplified matching:
+            best_iou, best_gt_idx = iou.max(1)
+            for p_idx in range(num_preds):
+                g_idx = best_gt_idx[p_idx]
+                if matches[p_idx, g_idx]:
+                    tp[p_idx, i] = True
+                    # Mask out this GT so it can't be matched again in this threshold
+                    matches[:, g_idx] = False
+                    
+    return tp
+
+
 class Metrics:
-    """Detection metrics calculator."""
+    """Detection metrics calculator for mAP50 and mAP50-95."""
     
-    def __init__(self):
-        self.stats = []
+    def __init__(self, iou_thresholds: Optional[torch.Tensor] = None):
+        self.iou_thresholds = iou_thresholds if iou_thresholds is not None else \
+                             torch.linspace(0.5, 0.95, 10)
+        self.stats = [] # List of (tp, conf, pred_cls, target_cls)
     
-    def process(
+    def process_batch(
         self,
-        tp: np.ndarray,
-        conf: np.ndarray,
-        pred_cls: np.ndarray,
-        target_cls: np.ndarray
+        detections: torch.Tensor,
+        gt_bboxes: torch.Tensor,
+        gt_labels: torch.Tensor
     ):
-        """Process batch results."""
-        self.stats.append((tp, conf, pred_cls, target_cls))
+        """
+        Process a batch of detections.
+        
+        Args:
+            detections: (N, 6) [x1, y1, x2, y2, conf, cls]
+            gt_bboxes: (M, 4) [x1, y1, x2, y2]
+            gt_labels: (M,) class indices
+        """
+        if detections.shape[0] == 0:
+            if gt_labels.shape[0] > 0:
+                self.stats.append((
+                    torch.zeros(0, len(self.iou_thresholds), dtype=torch.bool),
+                    torch.zeros(0),
+                    torch.zeros(0),
+                    gt_labels.cpu().numpy()
+                ))
+            return
+
+        tp = match_predictions(
+            detections[:, :4],
+            detections[:, 5],
+            detections[:, 4],
+            gt_bboxes,
+            gt_labels,
+            self.iou_thresholds.to(detections.device)
+        )
+        
+        self.stats.append((
+            tp.cpu(),
+            detections[:, 4].cpu(),
+            detections[:, 5].cpu(),
+            gt_labels.cpu().numpy()
+        ))
     
     def compute(self) -> dict:
         """Compute final metrics."""
         if not self.stats:
             return {'mAP50': 0, 'mAP50-95': 0, 'precision': 0, 'recall': 0}
         
-        tp = np.concatenate([s[0] for s in self.stats])
-        conf = np.concatenate([s[1] for s in self.stats])
-        pred_cls = np.concatenate([s[2] for s in self.stats])
+        tp = torch.cat([s[0] for s in self.stats], 0).numpy()
+        conf = torch.cat([s[1] for s in self.stats], 0).numpy()
+        pred_cls = torch.cat([s[2] for s in self.stats], 0).numpy()
         target_cls = np.concatenate([s[3] for s in self.stats])
         
-        precision, recall, ap, _ = compute_ap_per_class(tp, conf, pred_cls, target_cls)
+        # Compute AP for each class and each threshold
+        nc = len(np.unique(target_cls))
+        ap = np.zeros((nc, tp.shape[1]))
         
+        for i in range(tp.shape[1]):
+            precision, recall, ap_thresh, _ = compute_ap_per_class(
+                tp[:, i], conf, pred_cls, target_cls
+            )
+            ap[:, i] = ap_thresh
+            
         return {
-            'precision': precision.mean(),
-            'recall': recall.mean(),
-            'mAP50': ap.mean(),
-            'mAP50-95': ap.mean()  # Simplified
+            'mAP50': ap[:, 0].mean() if ap.size > 0 else 0,
+            'mAP50-95': ap.mean() if ap.size > 0 else 0,
+            'precision': 0, # Could be added if needed
+            'recall': 0
         }

@@ -219,7 +219,7 @@ class GradualPruning:
 
 
 if __name__ == "__main__":
-    from yolov8.model import YOLOv11
+    from yolov11.model import YOLOv11
     
     print("Testing pruning utilities...")
     

@@ -1,3 +1,9 @@
 /coco_mini
 /runs
 __pycache__
+*.jpg
+*.png
+*.mp4
+*.pt
+*.onnx
+*.engine

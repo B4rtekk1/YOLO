@@ -1,5 +1,5 @@
 """
-Combined YOLOv8 Loss Function
+Combined YOLOv11 Loss Function
 Unifies all task-specific losses with Task-Aligned Assigner
 """
 
@@ -16,7 +16,7 @@ from .pose_loss import PoseLoss
 
 class TaskAlignedAssigner(nn.Module):
     """
-    Task-Aligned Assigner for YOLOv8.
+    Task-Aligned Assigner for YOLOv11.
     
     Assigns ground truth targets to anchor points based on both
     classification and localization quality.
@@ -131,7 +131,7 @@ class TaskAlignedAssigner(nn.Module):
         cls_scores = pred_scores.permute(0, 2, 1)  # (B, C, N)
         gt_labels_expanded = gt_labels.unsqueeze(-1).expand(-1, -1, num_anchors)
         pred_cls_scores = cls_scores.gather(1, gt_labels_expanded.clamp(0, self.num_classes - 1))  # (B, M, N)
-        pred_cls_scores = pred_cls_scores.sigmoid()
+        # pred_cls_scores = pred_cls_scores.sigmoid() # REMOVED: redundant as input already has sigmoid
         
         # Calculate IoU between predictions and GTs
         # pred_bboxes: (B, N, 4), gt_bboxes: (B, M, 4)
@@ -198,7 +198,7 @@ class TaskAlignedAssigner(nn.Module):
         overlaps: torch.Tensor,
         num_gt: int
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Select top-k anchors for each GT."""
+        """Select top-k anchors for each GT (vectorized implementation)."""
         batch_size, _, num_anchors = mask_pos.shape
         
         # Top-k alignment metric per GT
@@ -209,12 +209,12 @@ class TaskAlignedAssigner(nn.Module):
             largest=True
         )
         
-        # Create top-k mask
+        # Create top-k mask using vectorized scatter_ operation
         topk_mask = torch.zeros_like(mask_pos, dtype=torch.bool)
-        for b in range(batch_size):
-            for gt in range(num_gt):
-                if mask_pos[b, gt].any():
-                    topk_mask[b, gt, topk_idx[b, gt]] = True
+        # Expand valid GT mask to match topk_idx shape for scattering
+        valid_gt_mask = mask_pos.any(dim=-1, keepdim=True).expand_as(topk_idx)
+        # Use scatter to set True at topk indices where GT is valid
+        topk_mask.scatter_(-1, topk_idx, valid_gt_mask)
         
         mask_pos = mask_pos & topk_mask
         
@@ -255,9 +255,9 @@ class TaskAlignedAssigner(nn.Module):
         return target_labels, target_bboxes, target_scores
 
 
-class YOLOv8Loss(nn.Module):
+class YOLOv11Loss(nn.Module):
     """
-    Combined YOLOv8 Loss for all tasks.
+    Combined YOLOv11 Loss for all tasks.
     
     Supports:
     - Detection: box + classification loss
@@ -282,7 +282,8 @@ class YOLOv8Loss(nn.Module):
         cls_weight: float = 0.5,
         dfl_weight: float = 1.5,
         seg_weight: float = 3.0,
-        pose_weight: float = 12.0
+        pose_weight: float = 12.0,
+        label_smoothing: float = 0.0
     ):
         super().__init__()
         
@@ -296,6 +297,7 @@ class YOLOv8Loss(nn.Module):
         self.dfl_weight = dfl_weight
         self.seg_weight = seg_weight
         self.pose_weight = pose_weight
+        self.label_smoothing = label_smoothing
         
         # Task-aligned assigner
         self.assigner = TaskAlignedAssigner(
@@ -336,13 +338,13 @@ class YOLOv8Loss(nn.Module):
         device = cls_preds[0].device
         batch_size = cls_preds[0].shape[0]
         
-        # Flatten predictions across scales
-        cls_flat, reg_flat, anchor_points = self._flatten_predictions(
+        # Flatten predictions across scales and get feature map sizes
+        cls_flat, reg_flat, anchor_points, feat_sizes = self._flatten_predictions(
             cls_preds, reg_preds, strides, device
         )
         
-        # Decode boxes for assignment
-        pred_bboxes = self._decode_boxes(reg_flat, anchor_points, strides)
+        # Decode boxes for assignment using actual feature map sizes
+        pred_bboxes = self._decode_boxes(reg_flat, anchor_points, strides, feat_sizes)
         
         # Get targets
         gt_labels = targets['labels']  # (B, M)
@@ -361,6 +363,10 @@ class YOLOv8Loss(nn.Module):
         
         target_scores_sum = target_scores.sum().clamp(min=1)
         
+        # Apply label smoothing to target scores
+        if self.label_smoothing > 0:
+            target_scores = target_scores * (1 - self.label_smoothing) + self.label_smoothing / self.num_classes
+        
         # Classification loss
         loss_cls = self.bce_loss(cls_flat, target_scores).sum() / target_scores_sum
         
@@ -373,7 +379,14 @@ class YOLOv8Loss(nn.Module):
             loss_box = (loss_box * target_scores[fg_mask].sum(-1)).sum() / target_scores_sum
             
             # DFL loss
-            target_ltrb = self._box2dist(anchor_points, target_bboxes, self.reg_max)
+            # Get stride for each anchor
+            num_per_level = [h * w for h, w in feat_sizes]
+            stride_tensor = torch.cat([
+                torch.full((n,), s, device=device, dtype=torch.float)
+                for n, s in zip(num_per_level, strides)
+            ]).view(1, -1, 1)
+            
+            target_ltrb = self._box2dist(anchor_points, target_bboxes, stride_tensor)
             loss_dfl = self._compute_dfl_loss(reg_flat[fg_mask], target_ltrb[fg_mask])
         else:
             loss_box = torch.tensor(0.0, device=device)
@@ -413,14 +426,16 @@ class YOLOv8Loss(nn.Module):
         reg_preds: List[torch.Tensor],
         strides: List[int],
         device: torch.device
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Flatten multi-scale predictions."""
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[Tuple[int, int]]]:
+        """Flatten multi-scale predictions and return feature map sizes."""
         cls_flat = []
         reg_flat = []
         anchor_points = []
+        feat_sizes = []  # Store actual feature map sizes
         
         for cls_pred, reg_pred, stride in zip(cls_preds, reg_preds, strides):
             b, c, h, w = cls_pred.shape
+            feat_sizes.append((h, w))  # Store actual size
             
             # Flatten spatial dimensions
             cls_flat.append(cls_pred.view(b, c, -1).permute(0, 2, 1))  # (B, H*W, C)
@@ -439,15 +454,16 @@ class YOLOv8Loss(nn.Module):
         reg_flat = torch.cat(reg_flat, dim=1)  # (B, N, 4*reg_max)
         anchor_points = torch.cat(anchor_points, dim=0)  # (N, 2)
         
-        return cls_flat, reg_flat, anchor_points
+        return cls_flat, reg_flat, anchor_points, feat_sizes
     
     def _decode_boxes(
         self,
         reg_preds: torch.Tensor,
         anchor_points: torch.Tensor,
-        strides: List[int]
+        strides: List[int],
+        feat_sizes: List[Tuple[int, int]]
     ) -> torch.Tensor:
-        """Decode box predictions."""
+        """Decode box predictions using actual feature map sizes."""
         b = reg_preds.shape[0]
         
         # Apply softmax and integrate
@@ -462,10 +478,10 @@ class YOLOv8Loss(nn.Module):
         lt = reg_preds[..., :2]
         rb = reg_preds[..., 2:]
         
-        # Get stride for each anchor
-        num_per_level = [(640 // s) ** 2 for s in strides]
+        # Get stride for each anchor using actual feature map sizes
+        num_per_level = [h * w for h, w in feat_sizes]
         stride_tensor = torch.cat([
-            torch.full((n,), s, device=reg_preds.device)
+            torch.full((n,), s, device=reg_preds.device, dtype=torch.float)
             for n, s in zip(num_per_level, strides)
         ])
         stride_tensor = stride_tensor.view(1, -1, 1)
@@ -479,13 +495,13 @@ class YOLOv8Loss(nn.Module):
         self,
         anchor_points: torch.Tensor,
         bboxes: torch.Tensor,
-        reg_max: int
+        stride: torch.Tensor
     ) -> torch.Tensor:
-        """Convert boxes to distance format."""
+        """Convert boxes to distance format normalized by stride."""
         x1y1, x2y2 = bboxes[..., :2], bboxes[..., 2:]
-        lt = anchor_points - x1y1
-        rb = x2y2 - anchor_points
-        return torch.cat([lt, rb], dim=-1).clamp(0, reg_max - 0.01)
+        lt = (anchor_points - x1y1) / stride
+        rb = (x2y2 - anchor_points) / stride
+        return torch.cat([lt, rb], dim=-1).clamp(0, self.reg_max - 0.01)
     
     def _compute_dfl_loss(
         self,
@@ -515,9 +531,102 @@ class YOLOv8Loss(nn.Module):
         targets: Dict,
         fg_mask: torch.Tensor
     ) -> torch.Tensor:
-        """Compute segmentation loss."""
-        # Placeholder - full implementation requires mask assembly
-        return torch.tensor(0.0, device=fg_mask.device)
+        """
+        Compute instance segmentation loss.
+        
+        Args:
+            predictions: Model outputs containing 'masks' (coefficients) and 'protos'
+            targets: Ground truth containing 'masks' (N, H, W) binary masks
+            fg_mask: Foreground mask (B, num_anchors)
+            
+        Returns:
+            Segmentation loss tensor
+        """
+        if not fg_mask.any():
+            return torch.tensor(0.0, device=fg_mask.device)
+        
+        # Get mask predictions
+        mask_coeffs = predictions.get('masks')  # List of (B, num_protos, H, W) per scale
+        protos = predictions.get('protos')  # (B, num_protos, proto_H, proto_W)
+        
+        if mask_coeffs is None or protos is None:
+            return torch.tensor(0.0, device=fg_mask.device)
+        
+        # Flatten mask coefficients across scales
+        mask_flat = []
+        for mask in mask_coeffs:
+            b, c, h, w = mask.shape
+            mask_flat.append(mask.view(b, c, -1).permute(0, 2, 1))  # (B, H*W, num_protos)
+        mask_flat = torch.cat(mask_flat, dim=1)  # (B, N, num_protos)
+        
+        # Get target masks
+        target_masks = targets['masks']  # (B, M, mask_H, mask_W)
+        target_bboxes = targets['bboxes']  # (B, M, 4)
+        
+        batch_size = fg_mask.shape[0]
+        device = fg_mask.device
+        total_loss = torch.tensor(0.0, device=device)
+        num_fg = 0
+        
+        for b in range(batch_size):
+            fg_idx = fg_mask[b].nonzero(as_tuple=True)[0]
+            if len(fg_idx) == 0:
+                continue
+            
+            # Get coefficients for foreground predictions
+            coeffs = mask_flat[b, fg_idx]  # (num_fg, num_protos)
+            
+            # Get prototypes for this batch
+            proto = protos[b]  # (num_protos, pH, pW)
+            proto_h, proto_w = proto.shape[1:]
+            
+            # Assemble predicted masks: coeffs @ proto -> (num_fg, pH, pW)
+            proto_flat = proto.view(proto.shape[0], -1)  # (num_protos, pH*pW)
+            pred_masks = torch.mm(coeffs, proto_flat)  # (num_fg, pH*pW)
+            pred_masks = pred_masks.view(-1, proto_h, proto_w)  # (num_fg, pH, pW)
+            
+            # Get target masks for this batch
+            n_targets = min(len(fg_idx), target_masks.shape[1])
+            if n_targets == 0:
+                continue
+                
+            gt_masks = target_masks[b, :n_targets]  # (n_targets, mask_H, mask_W)
+            
+            # Resize target masks to proto size
+            gt_masks = F.interpolate(
+                gt_masks.unsqueeze(1).float(),
+                size=(proto_h, proto_w),
+                mode='bilinear',
+                align_corners=False
+            ).squeeze(1)  # (n_targets, pH, pW)
+            
+            # Match predictions to targets (simplified - use first n_targets)
+            pred_masks_matched = pred_masks[:n_targets]
+            
+            # Compute BCE loss
+            bce_loss = F.binary_cross_entropy_with_logits(
+                pred_masks_matched,
+                gt_masks,
+                reduction='none'
+            )
+            
+            # Compute Dice loss
+            pred_sigmoid = pred_masks_matched.sigmoid()
+            pred_flat = pred_sigmoid.flatten(1)
+            gt_flat = gt_masks.flatten(1)
+            
+            intersection = (pred_flat * gt_flat).sum(1)
+            union = pred_flat.sum(1) + gt_flat.sum(1)
+            dice_loss = 1.0 - (2.0 * intersection + 1.0) / (union + 1.0)
+            
+            # Combine losses
+            batch_loss = bce_loss.mean() + dice_loss.mean()
+            total_loss = total_loss + batch_loss
+            num_fg += n_targets
+        
+        if num_fg > 0:
+            return total_loss / batch_size
+        return torch.tensor(0.0, device=device)
     
     def _compute_pose_loss(
         self,
@@ -525,16 +634,100 @@ class YOLOv8Loss(nn.Module):
         targets: Dict,
         fg_mask: torch.Tensor
     ) -> torch.Tensor:
-        """Compute pose loss."""
-        # Placeholder - full implementation requires keypoint assembly
-        return torch.tensor(0.0, device=fg_mask.device)
+        """
+        Compute pose estimation loss using OKS.
+        
+        Args:
+            predictions: Model outputs containing 'kpts' (keypoint predictions)
+            targets: Ground truth containing 'keypoints' (N, 17, 3) and 'areas'
+            fg_mask: Foreground mask (B, num_anchors)
+            
+        Returns:
+            Pose loss tensor
+        """
+        if not fg_mask.any():
+            return torch.tensor(0.0, device=fg_mask.device)
+        
+        # Get keypoint predictions for foreground anchors
+        kpt_preds = predictions.get('kpts')
+        if kpt_preds is None:
+            return torch.tensor(0.0, device=fg_mask.device)
+        
+        # Flatten keypoint predictions across scales
+        kpt_flat = []
+        for kpt in kpt_preds:
+            b, c, h, w = kpt.shape
+            # c = num_keypoints * 3 (x, y, visibility) = 51
+            kpt_flat.append(kpt.view(b, c, -1).permute(0, 2, 1))  # (B, H*W, 51)
+        kpt_flat = torch.cat(kpt_flat, dim=1)  # (B, N, 51)
+        
+        # Reshape to (B, N, 17, 3)
+        num_keypoints = 17
+        kpt_flat = kpt_flat.view(kpt_flat.shape[0], kpt_flat.shape[1], num_keypoints, 3)
+        
+        # Get target keypoints
+        target_kpts = targets['keypoints']  # (B, M, 17, 3) - x, y, visibility
+        target_areas = targets.get('areas', None)
+        
+        # For each foreground prediction, get the corresponding target keypoints
+        # This is a simplified version - full implementation would use target assignment
+        batch_size = fg_mask.shape[0]
+        
+        pred_kpts_fg = kpt_flat[fg_mask]  # (num_fg, 17, 3)
+        
+        if pred_kpts_fg.shape[0] == 0:
+            return torch.tensor(0.0, device=fg_mask.device)
+        
+        # Get coordinates and visibility
+        pred_coords = pred_kpts_fg[..., :2]  # (num_fg, 17, 2)
+        pred_vis = pred_kpts_fg[..., 2]      # (num_fg, 17)
+        
+        # Compute areas if not provided (use bbox area approximation)
+        if target_areas is None:
+            # Approximate area from keypoint spread
+            target_bboxes = targets['bboxes']  # (B, M, 4)
+            areas_flat = (target_bboxes[..., 2] - target_bboxes[..., 0]) * \
+                        (target_bboxes[..., 3] - target_bboxes[..., 1])
+            # Get areas for foreground (simplified - use mean)
+            areas = areas_flat[fg_mask[:, :areas_flat.shape[1]] if fg_mask.shape[1] > areas_flat.shape[1] 
+                              else fg_mask].clamp(min=1.0)
+        else:
+            areas = target_areas[fg_mask[:, :target_areas.shape[1]]].clamp(min=1.0)
+        
+        # Match predictions to targets (simplified - use first M targets repeated)
+        # Full implementation would use Hungarian matching or assignment from detector
+        num_fg = pred_kpts_fg.shape[0]
+        target_kpts_flat = target_kpts.view(-1, 17, 3)  # (B*M, 17, 3)
+        
+        # Repeat targets to match number of foreground predictions
+        if target_kpts_flat.shape[0] < num_fg:
+            repeat_factor = (num_fg // target_kpts_flat.shape[0]) + 1
+            target_kpts_flat = target_kpts_flat.repeat(repeat_factor, 1, 1)[:num_fg]
+        else:
+            target_kpts_flat = target_kpts_flat[:num_fg]
+        
+        target_coords = target_kpts_flat[..., :2]  # (num_fg, 17, 2)
+        target_vis = target_kpts_flat[..., 2]      # (num_fg, 17)
+        
+        # Ensure areas match
+        if areas.shape[0] != num_fg:
+            areas = areas.mean().expand(num_fg)
+        
+        # Compute OKS Loss
+        loss, _ = self.pose_loss(
+            pred_coords, pred_vis,
+            target_coords, target_vis,
+            areas
+        )
+        
+        return loss
 
 
 if __name__ == "__main__":
-    print("Testing YOLOv8 Loss...")
+    print("Testing YOLOv11 Loss...")
     
     # Create loss
-    loss_fn = YOLOv8Loss(task='detect', num_classes=80)
+    loss_fn = YOLOv11Loss(task='detect', num_classes=80)
     
     # Mock predictions
     predictions = {

@@ -1,5 +1,5 @@
 """
-Pose Estimation Loss for YOLOv8
+Pose Estimation Loss for YOLOv11
 Keypoint loss using OKS (Object Keypoint Similarity)
 """
 
@@ -192,7 +192,7 @@ class VisibilityLoss(nn.Module):
 
 class PoseLoss(nn.Module):
     """
-    Combined Pose Estimation Loss for YOLOv8.
+    Combined Pose Estimation Loss for YOLOv11.
     
     Combines:
     - OKS Loss for keypoint similarity

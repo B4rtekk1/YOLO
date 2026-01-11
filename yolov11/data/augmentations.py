@@ -1,5 +1,5 @@
 """
-Data Augmentations for YOLOv8
+Data Augmentations for YOLOv11
 """
 
 import cv2
@@ -21,7 +21,7 @@ class Compose:
 
 
 class LetterBox:
-    """Resize and pad image maintaining aspect ratio."""
+    """Resize and pad image while maintaining aspect ratio."""
     
     def __init__(self, new_shape=(640, 640), color=(114, 114, 114)):
         self.new_shape = new_shape if isinstance(new_shape, tuple) else (new_shape, new_shape)
@@ -45,11 +45,11 @@ class LetterBox:
             labels['bboxes'][:, [0, 2]] = labels['bboxes'][:, [0, 2]] * r + dw
             labels['bboxes'][:, [1, 3]] = labels['bboxes'][:, [1, 3]] * r + dh
         
-        return image, labels #type: ignore
+        return image, labels  # type: ignore
 
 
 class RandomHSV:
-    """Random HSV augmentation."""
+    """Random HSV color augmentation."""
     
     def __init__(self, h_gain=0.015, s_gain=0.7, v_gain=0.4):
         self.h_gain, self.s_gain, self.v_gain = h_gain, s_gain, v_gain
@@ -67,11 +67,11 @@ class RandomHSV:
 
 
 class RandomFlip:
-    """Random horizontal flip."""
+    """Random horizontal flip with keypoint swap support."""
     
     def __init__(self, p=0.5):
         self.p = p
-        self.flip_idx = [0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15]  # COCO keypoint swap
+        self.flip_idx = [0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15]
     
     def __call__(self, image: np.ndarray, labels: Dict) -> Tuple[np.ndarray, Dict]:
         if random.random() < self.p:
@@ -89,7 +89,7 @@ class RandomFlip:
 
 
 class Mosaic:
-    """Mosaic augmentation - combines 4 images."""
+    """Mosaic augmentation combining 4 images."""
     
     def __init__(self, img_size=640, p=1.0):
         self.img_size = img_size
@@ -106,32 +106,34 @@ class Mosaic:
         
         for i, (img, labels) in enumerate(zip(images[:4], labels_list[:4])):
             h, w = img.shape[:2]
-            if i == 0: x1a, y1a, x2a, y2a = max(xc-w, 0), max(yc-h, 0), xc, yc
-            elif i == 1: x1a, y1a, x2a, y2a = xc, max(yc-h, 0), min(xc+w, s*2), yc
-            elif i == 2: x1a, y1a, x2a, y2a = max(xc-w, 0), yc, xc, min(s*2, yc+h)
-            else: x1a, y1a, x2a, y2a = xc, yc, min(xc+w, s*2), min(s*2, yc+h)
+            if i == 0:
+                x1a, y1a, x2a, y2a = max(xc-w, 0), max(yc-h, 0), xc, yc
+            elif i == 1:
+                x1a, y1a, x2a, y2a = xc, max(yc-h, 0), min(xc+w, s*2), yc
+            elif i == 2:
+                x1a, y1a, x2a, y2a = max(xc-w, 0), yc, xc, min(s*2, yc+h)
+            else:
+                x1a, y1a, x2a, y2a = xc, yc, min(xc+w, s*2), min(s*2, yc+h)
             
-            # Calculate source coordinates
-            if i == 0:  # top-left
+            if i == 0:
                 x1b = w - (x2a - x1a)
                 y1b = h - (y2a - y1a)
                 x2b, y2b = w, h
-            elif i == 1:  # top-right
+            elif i == 1:
                 x1b = 0
                 y1b = h - (y2a - y1a)
                 x2b = min(x2a - x1a, w)
                 y2b = h
-            elif i == 2:  # bottom-left
+            elif i == 2:
                 x1b = w - (x2a - x1a)
                 y1b = 0
                 x2b, y2b = w, min(y2a - y1a, h)
-            else:  # bottom-right
+            else:
                 x1b, y1b = 0, 0
                 x2b = min(x2a - x1a, w)
                 y2b = min(y2a - y1a, h)
             
             img4[y1a:y2a, x1a:x2a] = img[y1b:y2b, x1b:x2b]
-
             
             if 'bboxes' in labels and len(labels['bboxes']) > 0:
                 bboxes = labels['bboxes'].copy()
@@ -147,13 +149,13 @@ class Mosaic:
         
         img4 = img4[yc-s//2:yc+s//2, xc-s//2:xc+s//2]
         if 'bboxes' in result:
-            result['bboxes'][:, [0,2]] -= (xc - s//2)
-            result['bboxes'][:, [1,3]] -= (yc - s//2)
+            result['bboxes'][:, [0, 2]] -= (xc - s//2)
+            result['bboxes'][:, [1, 3]] -= (yc - s//2)
         return img4, result
 
 
 class MixUp:
-    """MixUp augmentation."""
+    """MixUp augmentation for blending two images."""
     
     def __init__(self, alpha=32.0, p=0.5):
         self.alpha, self.p = alpha, p
@@ -171,11 +173,11 @@ class MixUp:
 
 
 class ToTensor:
-    """Convert to PyTorch tensor."""
+    """Convert numpy array to PyTorch tensor."""
     
     def __call__(self, image: np.ndarray, labels: Dict):
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image = torch.from_numpy(image).float().permute(2, 0, 1) / 255.0 #type: ignore
+        image = torch.from_numpy(image).float().permute(2, 0, 1) / 255.0  # type: ignore
         for k, v in labels.items():
             if isinstance(v, np.ndarray):
                 labels[k] = torch.from_numpy(v)
@@ -185,9 +187,7 @@ class ToTensor:
 class CutMix:
     """
     CutMix augmentation for object detection.
-    
-    Cuts a random patch from one image and pastes it onto another,
-    mixing labels proportionally.
+    Cuts a patch from one image and pastes onto another.
     """
     
     def __init__(self, p: float = 0.5, beta: float = 1.0):
@@ -200,60 +200,49 @@ class CutMix:
         
         h, w = img1.shape[:2]
         
-        # Sample lambda from beta distribution
         lam = np.random.beta(self.beta, self.beta)
         
-        # Calculate cut size
         cut_rat = np.sqrt(1.0 - lam)
         cut_w = int(w * cut_rat)
         cut_h = int(h * cut_rat)
         
-        # Random center
         cx = np.random.randint(w)
         cy = np.random.randint(h)
         
-        # Cut region
         bbx1 = np.clip(cx - cut_w // 2, 0, w)
         bby1 = np.clip(cy - cut_h // 2, 0, h)
         bbx2 = np.clip(cx + cut_w // 2, 0, w)
         bby2 = np.clip(cy + cut_h // 2, 0, h)
         
-        # Apply cutmix
         img = img1.copy()
         img[bby1:bby2, bbx1:bbx2] = img2[bby1:bby2, bbx1:bbx2]
         
-        # Merge labels - keep boxes that are still mostly visible
         labels = {}
         if 'bboxes' in labels1 and 'bboxes' in labels2:
-            # Filter boxes from img1 (keep if not in cut region)
             boxes1 = labels1['bboxes'].copy()
             keep1 = []
             for i, box in enumerate(boxes1):
-                # Check if box is mostly outside cut region
                 box_area = (box[2] - box[0]) * (box[3] - box[1])
                 inter_x1 = max(box[0], bbx1)
                 inter_y1 = max(box[1], bby1)
                 inter_x2 = min(box[2], bbx2)
                 inter_y2 = min(box[3], bby2)
                 inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
-                if inter_area < 0.5 * box_area:  # Keep if <50% covered
+                if inter_area < 0.5 * box_area:
                     keep1.append(i)
             
-            # Filter boxes from img2 (keep if in cut region)
             boxes2 = labels2['bboxes'].copy()
             keep2 = []
             for i, box in enumerate(boxes2):
-                # Check if box is mostly inside cut region
                 box_area = (box[2] - box[0]) * (box[3] - box[1])
                 inter_x1 = max(box[0], bbx1)
                 inter_y1 = max(box[1], bby1)
                 inter_x2 = min(box[2], bbx2)
                 inter_y2 = min(box[3], bby2)
                 inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
-                if inter_area > 0.5 * box_area:  # Keep if >50% inside
+                if inter_area > 0.5 * box_area:
                     keep2.append(i)
             
-            # Concatenate labels
             kept_boxes1 = boxes1[keep1] if len(keep1) > 0 else np.zeros((0, 4))
             kept_boxes2 = boxes2[keep2] if len(keep2) > 0 else np.zeros((0, 4))
             kept_labels1 = labels1['labels'][keep1] if len(keep1) > 0 else np.array([])
@@ -267,33 +256,110 @@ class CutMix:
 
 class CopyPaste:
     """
-    Copy-Paste augmentation for instance segmentation.
+    Copy-Paste augmentation for object detection.
     
-    Copies instances from one image and pastes them onto another.
+    Copies object regions from one image and pastes them onto another,
+    merging the bounding boxes and labels accordingly.
+    
+    Works with both masks (for segmentation) and bounding boxes (for detection).
     """
     
-    def __init__(self, p: float = 0.5):
+    def __init__(self, p: float = 0.5, max_objects: int = 3):
+        """
+        Args:
+            p: Probability of applying augmentation
+            max_objects: Maximum number of objects to copy
+        """
         self.p = p
+        self.max_objects = max_objects
     
     def __call__(self, img1, labels1, img2, labels2):
-        if random.random() > self.p or 'masks' not in labels2:
+        """
+        Apply CopyPaste augmentation.
+        
+        Args:
+            img1: Target image (where objects will be pasted)
+            labels1: Target labels dict with 'bboxes' and 'labels'
+            img2: Source image (where objects will be copied from)
+            labels2: Source labels dict
+            
+        Returns:
+            Augmented image and labels
+        """
+        if random.random() > self.p:
             return img1, labels1
         
-        # Simple implementation: copy random instances
+        # Check if source has objects to copy
+        if 'bboxes' not in labels2 or len(labels2.get('bboxes', [])) == 0:
+            return img1, labels1
+        
         h, w = img1.shape[:2]
-        n_instances = len(labels2.get('masks', []))
+        source_bboxes = labels2['bboxes']
+        source_labels = labels2['labels']
+        n_objects = len(source_bboxes)
         
-        if n_instances == 0:
+        if n_objects == 0:
             return img1, labels1
         
-        # Copy up to 3 random instances
-        n_copy = min(3, n_instances)
-        indices = random.sample(range(n_instances), n_copy)
+        # Select random objects to copy
+        n_copy = min(self.max_objects, n_objects)
+        indices = random.sample(range(n_objects), n_copy)
+        
+        img_out = img1.copy()
+        new_bboxes = []
+        new_labels = []
         
         for idx in indices:
-            mask = labels2['masks'][idx]
-            # Paste instance
-            img1[mask > 0] = img2[mask > 0]
+            bbox = source_bboxes[idx].astype(int)
+            x1, y1, x2, y2 = bbox
+            
+            # Ensure valid bbox
+            x1, x2 = max(0, x1), min(w, x2)
+            y1, y2 = max(0, y1), min(h, y2)
+            
+            if x2 <= x1 or y2 <= y1:
+                continue
+            
+            # Extract object region from source
+            obj_region = img2[y1:y2, x1:x2].copy()
+            
+            # Random placement in target image
+            obj_h, obj_w = obj_region.shape[:2]
+            
+            # Calculate valid placement range
+            max_x = w - obj_w
+            max_y = h - obj_h
+            
+            if max_x <= 0 or max_y <= 0:
+                continue
+            
+            # Random position
+            paste_x = random.randint(0, max_x)
+            paste_y = random.randint(0, max_y)
+            
+            # Paste object
+            img_out[paste_y:paste_y+obj_h, paste_x:paste_x+obj_w] = obj_region
+            
+            # Create new bbox
+            new_bbox = np.array([paste_x, paste_y, paste_x + obj_w, paste_y + obj_h])
+            new_bboxes.append(new_bbox)
+            new_labels.append(source_labels[idx])
         
-        return img1, labels1
+        # Merge labels
+        result_labels = {}
+        if 'bboxes' in labels1 and len(labels1['bboxes']) > 0:
+            if new_bboxes:
+                result_labels['bboxes'] = np.concatenate([labels1['bboxes'], np.array(new_bboxes)])
+                result_labels['labels'] = np.concatenate([labels1['labels'], np.array(new_labels)])
+            else:
+                result_labels['bboxes'] = labels1['bboxes']
+                result_labels['labels'] = labels1['labels']
+        elif new_bboxes:
+            result_labels['bboxes'] = np.array(new_bboxes)
+            result_labels['labels'] = np.array(new_labels)
+        else:
+            result_labels['bboxes'] = np.zeros((0, 4))
+            result_labels['labels'] = np.array([])
+        
+        return img_out, result_labels
 

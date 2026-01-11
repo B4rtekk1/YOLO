@@ -1,13 +1,12 @@
 """
 YOLOv11 Building Blocks
-Basic components used throughout the architecture
-Includes: C3k2 (faster CSP), C2PSA (spatial attention), and legacy C2f
+Core components: C3k2 (efficient CSP), C2PSA (spatial attention), and standard blocks
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, List
+from typing import Optional, List
 
 
 def autopad(kernel_size: int, padding: Optional[int] = None, dilation: int = 1) -> int:
@@ -19,9 +18,9 @@ def autopad(kernel_size: int, padding: Optional[int] = None, dilation: int = 1) 
 
 class Conv(nn.Module):
     """
-    Standard Convolution block: Conv2d + BatchNorm2d + SiLU activation
+    Standard convolution block: Conv2d + BatchNorm2d + SiLU
     
-    This is the most basic building block used throughout YOLOv8
+    The basic building block used throughout the architecture.
     """
     
     def __init__(
@@ -53,15 +52,12 @@ class Conv(nn.Module):
         return self.act(self.bn(self.conv(x)))
     
     def forward_fuse(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass without batch norm (for inference after fusion)."""
+        """Forward pass without batch norm (for fused inference)."""
         return self.act(self.conv(x))
 
 
 class DWConv(Conv):
-    """
-    Depthwise Convolution
-    Uses groups=in_channels for depthwise separable convolution
-    """
+    """Depthwise convolution with groups=in_channels."""
     
     def __init__(
         self,
@@ -84,7 +80,7 @@ class DWConv(Conv):
 
 
 class DWConvTranspose2d(nn.ConvTranspose2d):
-    """Depthwise Transposed Convolution."""
+    """Depthwise transposed convolution."""
     
     def __init__(
         self,
@@ -109,9 +105,8 @@ class DWConvTranspose2d(nn.ConvTranspose2d):
 
 class Bottleneck(nn.Module):
     """
-    Standard Bottleneck block with residual connection
-    
-    Structure: 1x1 conv -> 3x3 conv with optional residual
+    Standard bottleneck block with optional residual connection.
+    Structure: 1x1 conv -> 3x3 conv [+ residual]
     """
     
     def __init__(
@@ -134,13 +129,10 @@ class Bottleneck(nn.Module):
 
 class C2f(nn.Module):
     """
-    CSP Bottleneck with 2 convolutions (faster version of C3)
+    CSP Bottleneck with 2 convolutions.
+    Improves gradient flow while maintaining computational efficiency.
     
-    This is a key component in YOLOv8 that improves gradient flow
-    while maintaining computational efficiency.
-    
-    Structure:
-        Input -> [Conv 1x1] -> Split -> [n x Bottleneck] -> Concat -> [Conv 1x1] -> Output
+    Structure: Input -> Conv1x1 -> Split -> [n x Bottleneck] -> Concat -> Conv1x1 -> Output
     """
     
     def __init__(
@@ -153,7 +145,7 @@ class C2f(nn.Module):
         expansion: float = 0.5
     ):
         super().__init__()
-        self.c = int(out_channels * expansion)  # hidden channels
+        self.c = int(out_channels * expansion)
         self.cv1 = Conv(in_channels, 2 * self.c, 1, 1)
         self.cv2 = Conv((2 + n) * self.c, out_channels, 1, 1)
         self.m = nn.ModuleList(
@@ -162,15 +154,12 @@ class C2f(nn.Module):
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Split input into two parts
         y = list(self.cv1(x).chunk(2, 1))
-        # Apply bottlenecks sequentially, keeping all intermediate outputs
         y.extend(m(y[-1]) for m in self.m)
-        # Concatenate all features and apply final conv
         return self.cv2(torch.cat(y, 1))
     
     def forward_split(self, x: torch.Tensor) -> torch.Tensor:
-        """Alternative forward with split instead of chunk."""
+        """Alternative forward using split instead of chunk."""
         y = list(self.cv1(x).split((self.c, self.c), 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
@@ -178,13 +167,10 @@ class C2f(nn.Module):
 
 class SPPF(nn.Module):
     """
-    Spatial Pyramid Pooling - Fast (SPPF)
+    Spatial Pyramid Pooling - Fast
     
-    Uses sequential max pooling operations instead of parallel ones
-    for better computational efficiency while maintaining receptive field.
-    
-    Structure:
-        Input -> Conv 1x1 -> [MaxPool 5x5]×3 (sequential) -> Concat -> Conv 1x1 -> Output
+    Uses sequential max pooling for efficiency while maintaining receptive field.
+    Structure: Input -> Conv1x1 -> [MaxPool5x5]x3 (sequential) -> Concat -> Conv1x1 -> Output
     """
     
     def __init__(
@@ -223,7 +209,7 @@ class Concat(nn.Module):
 
 
 class Upsample(nn.Module):
-    """Upsampling layer using bilinear interpolation."""
+    """Upsampling layer using interpolation."""
     
     def __init__(self, scale_factor: int = 2, mode: str = 'nearest'):
         super().__init__()
@@ -236,10 +222,8 @@ class Upsample(nn.Module):
 
 class Proto(nn.Module):
     """
-    YOLOv8 mask Proto module for segmentation
-    
-    Generates prototype masks that are combined with mask coefficients
-    to produce instance-specific masks.
+    Mask prototype module for instance segmentation.
+    Generates prototype masks combined with mask coefficients for instance-specific masks.
     """
     
     def __init__(
@@ -262,49 +246,47 @@ class Proto(nn.Module):
 
 class DFL(nn.Module):
     """
-    Distribution Focal Loss layer
+    Distribution Focal Loss layer for box regression (vectorized).
     
-    Integral module for distribution-based box regression in YOLOv8.
-    Converts discrete probability distribution to continuous values.
-    
-    reg_max: Maximum discrete regression distance
+    Converts discrete probability distribution over bins [0, 1, ..., reg_max-1]
+    to continuous values, capturing localization uncertainty.
     """
     
     def __init__(self, reg_max: int = 16):
         super().__init__()
         self.reg_max = reg_max
-        # Create fixed weight for integration
-        self.conv = nn.Conv2d(reg_max, 1, 1, bias=False)
-        # Initialize weights as [0, 1, 2, ..., reg_max-1]
-        x = torch.arange(reg_max, dtype=torch.float)
-        self.conv.weight.data[:] = x.view(1, reg_max, 1, 1)
-        self.conv.weight.requires_grad = False
+        # Register weights as buffer for efficient computation
+        self.register_buffer('weights', torch.arange(reg_max, dtype=torch.float).view(1, 1, reg_max, 1))
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Apply softmax and integrate to get continuous value.
+        Vectorized DFL forward pass.
         
         Args:
-            x: Input tensor of shape (B, 4*reg_max, H, W) or (B, N, 4*reg_max)
+            x: Input tensor (B, 4*reg_max, H, W) or (B, N, 4*reg_max)
         
         Returns:
-            Integrated values of shape (B, 4, H, W) or (B, N, 4)
+            Integrated values (B, 4, H, W) or (B, N, 4)
         """
         b, c, *hw = x.shape
-        # Reshape to (B, 4, reg_max, H*W) for softmax
-        x = x.view(b, 4, self.reg_max, -1).transpose(2, 3)
-        # Apply softmax over reg_max dimension
-        x = F.softmax(x, dim=-1)
-        # Integrate: multiply by [0, 1, 2, ...] and sum
-        x = x.transpose(2, 3).reshape(b, 4 * self.reg_max, *hw)
-        # Use conv to integrate
-        x_split = x.chunk(4, dim=1)
-        return torch.cat([self.conv(xi) for xi in x_split], dim=1)
+        
+        # Reshape to (B, 4, reg_max, H*W)
+        x = x.view(b, 4, self.reg_max, -1)
+        
+        # Softmax over reg_max dimension
+        x = F.softmax(x, dim=2)
+        
+        # Vectorized weighted sum: (B, 4, reg_max, N) * (1, 1, reg_max, 1) -> sum -> (B, 4, N)
+        x = (x * self.weights).sum(dim=2)
+        
+        # Reshape back to original spatial dimensions
+        if hw:
+            x = x.view(b, 4, *hw)
+        
+        return x
 
 
-# ============================================================
-# YOLOv11 NEW BLOCKS
-# ============================================================
+# YOLOv11 Specific Blocks
 
 class C3k(nn.Module):
     """
@@ -314,7 +296,7 @@ class C3k(nn.Module):
         c1: Input channels
         c2: Output channels
         n: Number of bottleneck blocks
-        shortcut: Whether to use residual connection
+        shortcut: Use residual connection
         g: Groups for convolution
         e: Expansion ratio
         k: Kernel size for bottleneck convs
@@ -345,14 +327,12 @@ class C3k(nn.Module):
 
 class C3k2(nn.Module):
     """
-    YOLOv11 CSP Bottleneck with 2 convolutions (faster version).
+    YOLOv11 CSP Bottleneck with 2 convolutions (efficient version).
     
-    This is a key improvement in YOLOv11, replacing C2f with a more
-    computationally efficient implementation using smaller kernels.
-    
-    Main differences from C2f:
-    - Uses C3k sub-blocks for better feature extraction
-    - More efficient gradient flow
+    Replaces C2f with more efficient implementation using smaller kernels.
+    Key differences from C2f:
+    - Uses C3k sub-blocks for improved feature extraction
+    - Better gradient flow
     - Reduced computational cost
     """
     
@@ -367,11 +347,10 @@ class C3k2(nn.Module):
         shortcut: bool = True
     ):
         super().__init__()
-        self.c = int(c2 * e)  # hidden channels
+        self.c = int(c2 * e)
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv((2 + n) * self.c, c2, 1, 1)
         
-        # Use C3k blocks if c3k=True, otherwise standard Bottleneck
         if c3k:
             self.m = nn.ModuleList(
                 C3k(self.c, self.c, 2, shortcut, g) for _ in range(n)
@@ -390,54 +369,57 @@ class C3k2(nn.Module):
 
 class Attention(nn.Module):
     """
-    Simplified Spatial Attention Module for YOLOv11.
-    
-    Uses channel attention and spatial attention mechanisms.
+    Spatial attention module for YOLOv11.
+    Uses PyTorch 2.0+ scaled_dot_product_attention for efficiency (Flash Attention).
     """
     
     def __init__(self, dim: int, num_heads: int = 8, attn_ratio: float = 0.5):
         super().__init__()
-        self.num_heads = max(1, min(num_heads, dim // 8))  # Ensure valid num_heads
+        self.num_heads = max(1, min(num_heads, dim // 8))
         self.head_dim = dim // self.num_heads
         self.scale = self.head_dim ** -0.5
         
-        # QKV projection - output same dimension
         self.qkv = Conv(dim, dim * 3, 1)
-        
-        # Output projection
         self.proj = Conv(dim, dim, 1)
+        
+        # Check if scaled_dot_product_attention is available (PyTorch 2.0+)
+        self._use_sdpa = hasattr(F, 'scaled_dot_product_attention')
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
         N = H * W
         
-        # Compute QKV
-        qkv = self.qkv(x)  # (B, 3C, H, W)
+        qkv = self.qkv(x)
         qkv = qkv.view(B, 3, self.num_heads, self.head_dim, N)
-        q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]  # Each: (B, num_heads, head_dim, N)
+        q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]  # Each: (B, heads, head_dim, N)
         
-        # Attention: (B, num_heads, N, head_dim) @ (B, num_heads, head_dim, N) -> (B, num_heads, N, N)
-        attn = (q.transpose(-2, -1) @ k) * self.scale
-        attn = F.softmax(attn, dim=-1)
+        if self._use_sdpa:
+            # Use PyTorch 2.0+ Flash Attention (2-3x faster)
+            # Transpose to (B, heads, N, head_dim) for SDPA
+            q = q.transpose(-2, -1)  # (B, heads, N, head_dim)
+            k = k.transpose(-2, -1)
+            v = v.transpose(-2, -1)
+            
+            out = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
+            out = out.transpose(-2, -1)  # (B, heads, head_dim, N)
+        else:
+            # Fallback to manual attention for older PyTorch
+            attn = (q.transpose(-2, -1) @ k) * self.scale
+            attn = F.softmax(attn, dim=-1)
+            out = v @ attn.transpose(-2, -1)
         
-        # Apply attention to values: (B, num_heads, head_dim, N) @ (B, num_heads, N, N) -> (B, num_heads, head_dim, N)
-        out = v @ attn.transpose(-2, -1)
-        out = out.view(B, C, H, W)
-        
+        out = out.reshape(B, C, H, W)
         return self.proj(out)
-
 
 
 class C2PSA(nn.Module):
     """
     YOLOv11 Cross Stage Partial with Spatial Attention (C2PSA).
     
-    This is a key new block in YOLOv11 that enhances spatial attention
-    within feature maps, enabling the model to focus more effectively
-    on critical regions in an image.
+    Enhances spatial attention within feature maps, enabling the model
+    to focus on critical image regions.
     
-    Structure:
-        Input -> Conv 1x1 -> Split -> [Attention blocks] -> Concat -> Conv 1x1 -> Output
+    Structure: Input -> Conv1x1 -> Split -> [Attention blocks] -> Concat -> Conv1x1 -> Output
     """
     
     def __init__(
@@ -452,7 +434,6 @@ class C2PSA(nn.Module):
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv(2 * self.c, c2, 1, 1)
         
-        # Stack of attention blocks
         self.m = nn.Sequential(
             *[
                 nn.Sequential(
@@ -460,18 +441,13 @@ class C2PSA(nn.Module):
                     nn.Sequential(
                         Conv(self.c, self.c * 2, 1),
                         Conv(self.c * 2, self.c, 1)
-                    )  # FFN
+                    )
                 )
                 for _ in range(n)
             ]
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Split into two branches
         a, b = self.cv1(x).chunk(2, 1)
-        
-        # Apply attention to first branch
         b = self.m(b)
-        
-        # Concatenate and project
         return self.cv2(torch.cat([a, b], 1))

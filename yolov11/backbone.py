@@ -1,4 +1,4 @@
-""" 
+"""
 YOLOv11 Backbone - CSPDarknet with C3k2 and C2PSA
 Extracts multi-scale features from input images
 """
@@ -10,8 +10,7 @@ from typing import Tuple, Dict, List
 from .blocks import Conv, C3k2, C2PSA, SPPF
 
 
-# Model scaling configurations
-# Format: (depth_multiplier, width_multiplier)
+# Model scaling configurations: (depth_multiplier, width_multiplier)
 MODEL_SCALES: Dict[str, Tuple[float, float]] = {
     'n': (0.33, 0.25),  # nano
     's': (0.33, 0.50),  # small
@@ -43,10 +42,6 @@ class CSPDarknet(nn.Module):
         P4: Conv 3x3 s=2 + C3k2 -> 40x40   [output]
         P5: Conv 3x3 s=2 + C3k2 + SPPF + C2PSA -> 20x20 [output]
     
-    Key YOLOv11 improvements:
-        - C3k2 blocks replace C2f for better efficiency
-        - C2PSA adds spatial attention at P5
-    
     Args:
         model_size: One of 'n', 's', 'm', 'l', 'x'
         in_channels: Input image channels (default: 3 for RGB)
@@ -60,44 +55,40 @@ class CSPDarknet(nn.Module):
         
         depth_mult, width_mult = MODEL_SCALES[model_size]
         
-        # Calculate actual channel sizes
         channels = [make_divisible(c * width_mult) for c in BASE_CHANNELS]
-        # Calculate actual depths
         depths = [max(round(d * depth_mult), 1) for d in BASE_DEPTHS]
         
-        # Store output channel sizes for neck
         self.out_channels = channels[2:]  # P3, P4, P5 channels
         
-        # Stem: Initial convolution (P1)
-        self.stem = Conv(in_channels, channels[0], 3, 2)  # 640->320
+        # Stem
+        self.stem = Conv(in_channels, channels[0], 3, 2)
         
-        # Stage 1 (P2): 320->160
+        # Stage 1 (P2)
         self.stage1 = nn.Sequential(
             Conv(channels[0], channels[1], 3, 2),
             C3k2(channels[1], channels[1], n=depths[0], shortcut=True)
         )
         
-        # Stage 2 (P3): 160->80 - First output
+        # Stage 2 (P3) - First output
         self.stage2 = nn.Sequential(
             Conv(channels[1], channels[2], 3, 2),
             C3k2(channels[2], channels[2], n=depths[1], shortcut=True)
         )
         
-        # Stage 3 (P4): 80->40 - Second output
+        # Stage 3 (P4) - Second output
         self.stage3 = nn.Sequential(
             Conv(channels[2], channels[3], 3, 2),
             C3k2(channels[3], channels[3], n=depths[2], shortcut=True)
         )
         
-        # Stage 4 (P5): 40->20 - Third output with SPPF + C2PSA (YOLOv11)
+        # Stage 4 (P5) - Third output with SPPF + C2PSA
         self.stage4 = nn.Sequential(
             Conv(channels[3], channels[4], 3, 2),
             C3k2(channels[4], channels[4], n=depths[3], shortcut=True),
             SPPF(channels[4], channels[4], kernel_size=5),
-            C2PSA(channels[4], channels[4], n=1)  # YOLOv11 spatial attention
+            C2PSA(channels[4], channels[4], n=1)
         )
         
-        # Initialize weights
         self._initialize_weights()
     
     def _initialize_weights(self):
@@ -113,10 +104,10 @@ class CSPDarknet(nn.Module):
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Forward pass through backbone.
+        Forward pass.
         
         Args:
-            x: Input tensor of shape (B, 3, H, W)
+            x: Input tensor (B, 3, H, W)
         
         Returns:
             Tuple of feature maps (P3, P4, P5):
@@ -124,14 +115,11 @@ class CSPDarknet(nn.Module):
                 P4: (B, C4, H/16, W/16) - medium objects  
                 P5: (B, C5, H/32, W/32) - large objects
         """
-        # Stem
         x = self.stem(x)
-        
-        # Stages
         x = self.stage1(x)
-        p3 = self.stage2(x)   # 80x80 for 640 input
-        p4 = self.stage3(p3)  # 40x40 for 640 input
-        p5 = self.stage4(p4)  # 20x20 for 640 input
+        p3 = self.stage2(x)
+        p4 = self.stage3(p3)
+        p5 = self.stage4(p4)
         
         return p3, p4, p5
     
@@ -141,7 +129,6 @@ class CSPDarknet(nn.Module):
 
 
 if __name__ == "__main__":
-    # Test backbone
     for size in ['n', 's', 'm', 'l', 'x']:
         model = CSPDarknet(model_size=size)
         x = torch.randn(1, 3, 640, 640)

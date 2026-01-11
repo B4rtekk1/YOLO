@@ -5,7 +5,7 @@ Combines backbone, neck, and task-specific heads
 
 import torch
 import torch.nn as nn
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union, Any
 
 from .backbone import CSPDarknet, MODEL_SCALES
 from .neck import PANet
@@ -123,7 +123,7 @@ class YOLOv11(nn.Module):
     def forward(
         self,
         x: torch.Tensor
-    ) -> Dict[str, Union[torch.Tensor, List[torch.Tensor]]]:
+    ) -> Union[Dict[str, Any], List[torch.Tensor]]:
         """
         Forward pass through the model.
         
@@ -146,8 +146,13 @@ class YOLOv11(nn.Module):
         outputs = self.head(features)
         
         # Format outputs based on task
+        is_export = torch.onnx.is_in_onnx_export() or getattr(torch.jit, 'is_tracing', lambda: False)()
+        
         if self.task == 'detect':
             cls_outputs, reg_outputs = outputs
+            if is_export:
+                # Return list for ONNX compatibility (no integers)
+                return cls_outputs + reg_outputs
             return {
                 'cls': cls_outputs,
                 'reg': reg_outputs,
@@ -156,6 +161,8 @@ class YOLOv11(nn.Module):
         
         elif self.task == 'segment':
             cls_outputs, reg_outputs, mask_outputs, protos = outputs
+            if is_export:
+                return cls_outputs + reg_outputs + mask_outputs + [protos]
             return {
                 'cls': cls_outputs,
                 'reg': reg_outputs,
@@ -166,12 +173,16 @@ class YOLOv11(nn.Module):
         
         elif self.task == 'pose':
             cls_outputs, reg_outputs, kpt_outputs = outputs
+            if is_export:
+                return cls_outputs + reg_outputs + kpt_outputs
             return {
                 'cls': cls_outputs,
                 'reg': reg_outputs,
                 'kpt': kpt_outputs,
                 'strides': self.strides
             }
+        
+        return {}  # Default empty dict to satisfy type checker
     
     def get_anchors(self, device: torch.device) -> List[torch.Tensor]:
         """Get anchor grids on specified device."""
@@ -179,13 +190,22 @@ class YOLOv11(nn.Module):
     
     def fuse(self):
         """Fuse Conv2d + BatchNorm2d layers for inference optimization."""
+        if not hasattr(self, 'fused'):
+            self.fused = False
+            
+        if self.fused:
+            print("Model already fused.")
+            return self
+
         for m in self.modules():
             if hasattr(m, 'forward_fuse'):
                 # Fuse conv and bn
-                if hasattr(m, 'conv') and hasattr(m, 'bn'):
+                if hasattr(m, 'conv') and hasattr(m, 'bn') and isinstance(m.bn, nn.BatchNorm2d):
                     m.conv = self._fuse_conv_bn(m.conv, m.bn)
                     m.bn = nn.Identity()
                     m.forward = m.forward_fuse
+        
+        self.fused = True
         return self
     
     @staticmethod

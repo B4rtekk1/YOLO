@@ -1,5 +1,5 @@
 """
-Classification Loss for YOLOv8
+Classification Loss for YOLOv11
 Binary Cross Entropy with Task-Aligned Assigner
 """
 

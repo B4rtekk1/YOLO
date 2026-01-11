@@ -1,37 +1,23 @@
 """
-YOLOv8 Detection Heads
-Supports: Detection, Segmentation, Pose Estimation
+YOLOv11 Detection Heads
+Supports Detection, Segmentation, and Pose Estimation
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 import math
 
 from .blocks import Conv, DFL, Proto
 
 
-# COCO Keypoint skeleton definition (17 keypoints)
-# Format: [name, parent_index, flip_index]
+# COCO keypoint definitions (17 keypoints)
 COCO_KEYPOINTS = [
-    'nose',           # 0
-    'left_eye',       # 1
-    'right_eye',      # 2
-    'left_ear',       # 3
-    'right_ear',      # 4
-    'left_shoulder',  # 5
-    'right_shoulder', # 6
-    'left_elbow',     # 7
-    'right_elbow',    # 8
-    'left_wrist',     # 9
-    'right_wrist',    # 10
-    'left_hip',       # 11
-    'right_hip',      # 12
-    'left_knee',      # 13
-    'right_knee',     # 14
-    'left_ankle',     # 15
-    'right_ankle',    # 16
+    'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
+    'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
+    'left_wrist', 'right_wrist', 'left_hip', 'right_hip',
+    'left_knee', 'right_knee', 'left_ankle', 'right_ankle',
 ]
 
 # Skeleton connections for visualization
@@ -45,15 +31,9 @@ COCO_SKELETON = [
 
 class DetectionHead(nn.Module):
     """
-    YOLOv8 Anchor-free Detection Head
+    Anchor-free detection head with decoupled classification and regression.
     
-    Uses decoupled head architecture with separate branches for
-    classification and box regression.
-    
-    Key features:
-    - Anchor-free detection
-    - Distribution Focal Loss (DFL) for box regression
-    - Decoupled classification and regression branches
+    Uses Distribution Focal Loss (DFL) for box regression.
     
     Args:
         num_classes: Number of detection classes
@@ -73,41 +53,32 @@ class DetectionHead(nn.Module):
         self.reg_max = reg_max
         self.num_outputs_per_anchor = num_classes + 4 * reg_max
         
-        # DFL layer for box regression
         self.dfl = DFL(reg_max)
         
-        # Detection heads for each scale
         self.cls_convs = nn.ModuleList()
         self.reg_convs = nn.ModuleList()
         self.cls_preds = nn.ModuleList()
         self.reg_preds = nn.ModuleList()
         
         for ch in in_channels:
-            # Classification branch (2 conv layers)
             self.cls_convs.append(nn.Sequential(
                 Conv(ch, ch, 3, 1),
                 Conv(ch, ch, 3, 1)
             ))
             
-            # Regression branch (2 conv layers)
             self.reg_convs.append(nn.Sequential(
                 Conv(ch, ch, 3, 1),
                 Conv(ch, ch, 3, 1)
             ))
             
-            # Classification prediction
             self.cls_preds.append(nn.Conv2d(ch, num_classes, 1))
-            
-            # Box regression prediction (4 * reg_max for DFL)
             self.reg_preds.append(nn.Conv2d(ch, 4 * reg_max, 1))
         
-        # Initialize weights
         self._initialize_biases()
     
     def _initialize_biases(self):
-        """Initialize prediction biases for better training stability."""
+        """Initialize prediction biases for training stability."""
         for cls_pred in self.cls_preds:
-            # Initialize classification bias for class imbalance
             b = cls_pred.bias.view(-1, )
             b.data.fill_(-math.log((1 - 0.01) / 0.01))  # Prior probability 0.01
             cls_pred.bias = nn.Parameter(b, requires_grad=True)
@@ -117,25 +88,21 @@ class DetectionHead(nn.Module):
         features: Tuple[torch.Tensor, ...]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass through detection head.
+        Forward pass.
         
         Args:
             features: Tuple of feature maps (N3, N4, N5) from neck
         
         Returns:
-            Tuple of (cls_outputs, reg_outputs):
-                cls_outputs: List of classification outputs per scale
-                reg_outputs: List of box regression outputs per scale
+            Tuple of (cls_outputs, reg_outputs) per scale
         """
         cls_outputs = []
         reg_outputs = []
         
         for i, feat in enumerate(features):
-            # Classification branch
             cls_feat = self.cls_convs[i](feat)
             cls_out = self.cls_preds[i](cls_feat)
             
-            # Regression branch
             reg_feat = self.reg_convs[i](feat)
             reg_out = self.reg_preds[i](reg_feat)
             
@@ -166,16 +133,12 @@ class DetectionHead(nn.Module):
         for reg_out, anchor, stride in zip(reg_outputs, anchors, strides):
             b, _, h, w = reg_out.shape
             
-            # Apply DFL to get continuous values
-            reg_dist = self.dfl(reg_out)  # (B, 4, H, W)
+            reg_dist = self.dfl(reg_out)
+            reg_dist = reg_dist.view(b, 4, -1).permute(0, 2, 1)
+            anchor = anchor.view(-1, 2)
             
-            # Reshape
-            reg_dist = reg_dist.view(b, 4, -1).permute(0, 2, 1)  # (B, H*W, 4)
-            anchor = anchor.view(-1, 2)  # (H*W, 2)
-            
-            # Decode: dist2bbox
-            lt = reg_dist[..., :2]  # left-top distance
-            rb = reg_dist[..., 2:]  # right-bottom distance
+            lt = reg_dist[..., :2]
+            rb = reg_dist[..., 2:]
             
             x1y1 = anchor - lt * stride
             x2y2 = anchor + rb * stride
@@ -187,10 +150,9 @@ class DetectionHead(nn.Module):
 
 class SegmentationHead(nn.Module):
     """
-    YOLOv8 Instance Segmentation Head
+    Instance segmentation head extending detection with mask coefficients.
     
-    Extends detection head with mask coefficient prediction.
-    Uses prototype masks that are linearly combined with coefficients.
+    Uses prototype masks linearly combined with per-instance coefficients.
     
     Args:
         num_classes: Number of detection classes
@@ -214,33 +176,26 @@ class SegmentationHead(nn.Module):
         self.num_protos = num_protos
         self.reg_max = reg_max
         
-        # Detection head components
         self.dfl = DFL(reg_max)
-        
-        # Proto mask generator (from P3 features)
         self.proto = Proto(in_channels[0], proto_channels, num_protos)
         
-        # Detection heads with mask coefficients
         self.cls_convs = nn.ModuleList()
         self.reg_convs = nn.ModuleList()
         self.cls_preds = nn.ModuleList()
         self.reg_preds = nn.ModuleList()
-        self.mask_preds = nn.ModuleList()  # Mask coefficients
+        self.mask_preds = nn.ModuleList()
         
         for ch in in_channels:
-            # Classification branch
             self.cls_convs.append(nn.Sequential(
                 Conv(ch, ch, 3, 1),
                 Conv(ch, ch, 3, 1)
             ))
             
-            # Regression branch
             self.reg_convs.append(nn.Sequential(
                 Conv(ch, ch, 3, 1),
                 Conv(ch, ch, 3, 1)
             ))
             
-            # Predictions
             self.cls_preds.append(nn.Conv2d(ch, num_classes, 1))
             self.reg_preds.append(nn.Conv2d(ch, 4 * reg_max, 1))
             self.mask_preds.append(nn.Conv2d(ch, num_protos, 1))
@@ -259,35 +214,26 @@ class SegmentationHead(nn.Module):
         features: Tuple[torch.Tensor, ...]
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], torch.Tensor]:
         """
-        Forward pass through segmentation head.
+        Forward pass.
         
         Args:
             features: Tuple of feature maps (N3, N4, N5) from neck
         
         Returns:
-            Tuple of (cls_outputs, reg_outputs, mask_coeffs, protos):
-                cls_outputs: Classification predictions per scale
-                reg_outputs: Box regression predictions per scale
-                mask_coeffs: Mask coefficients per scale
-                protos: Prototype masks (B, num_protos, H, W)
+            Tuple of (cls_outputs, reg_outputs, mask_coeffs, protos)
         """
         cls_outputs = []
         reg_outputs = []
         mask_outputs = []
         
-        # Generate prototype masks from P3
-        protos = self.proto(features[0])  # (B, num_protos, H/4, W/4)
+        protos = self.proto(features[0])
         
         for i, feat in enumerate(features):
-            # Classification branch
             cls_feat = self.cls_convs[i](feat)
             cls_out = self.cls_preds[i](cls_feat)
             
-            # Regression branch
             reg_feat = self.reg_convs[i](feat)
             reg_out = self.reg_preds[i](reg_feat)
-            
-            # Mask coefficients (from regression branch)
             mask_out = self.mask_preds[i](reg_feat)
             
             cls_outputs.append(cls_out)
@@ -315,18 +261,12 @@ class SegmentationHead(nn.Module):
         Returns:
             Instance masks (N, H, W)
         """
-        # Linear combination: masks = coeffs @ protos
-        # protos: (1, num_protos, ph, pw) -> (num_protos, ph*pw)
-        # coeffs: (N, num_protos)
-        # result: (N, ph*pw) -> (N, ph, pw)
-        
         ph, pw = protos.shape[2:]
-        protos_flat = protos[0].view(self.num_protos, -1)  # (num_protos, ph*pw)
+        protos_flat = protos[0].view(self.num_protos, -1)
         
-        masks = torch.mm(mask_coeffs, protos_flat)  # (N, ph*pw)
-        masks = masks.sigmoid().view(-1, ph, pw)  # (N, ph, pw)
+        masks = torch.mm(mask_coeffs, protos_flat)
+        masks = masks.sigmoid().view(-1, ph, pw)
         
-        # Crop masks to bounding boxes and resize to full image
         masks = self._crop_masks(masks, boxes, img_size)
         
         return masks
@@ -341,7 +281,6 @@ class SegmentationHead(nn.Module):
         h, w = img_size
         n = masks.shape[0]
         
-        # Resize masks to image size
         masks = F.interpolate(
             masks.unsqueeze(1),
             size=(h, w),
@@ -349,7 +288,6 @@ class SegmentationHead(nn.Module):
             align_corners=False
         ).squeeze(1)
         
-        # Create output masks
         output_masks = torch.zeros((n, h, w), device=masks.device)
         
         for i in range(n):
@@ -364,9 +302,8 @@ class SegmentationHead(nn.Module):
 
 class PoseHead(nn.Module):
     """
-    YOLOv8 Human Pose Estimation Head
+    Pose estimation head extending detection with keypoint prediction.
     
-    Extends detection head with keypoint prediction.
     Predicts 17 COCO keypoints per detection.
     
     Args:
@@ -389,41 +326,34 @@ class PoseHead(nn.Module):
         self.num_keypoints = num_keypoints
         self.reg_max = reg_max
         
-        # DFL for box regression
         self.dfl = DFL(reg_max)
         
-        # Detection and pose heads
         self.cls_convs = nn.ModuleList()
         self.reg_convs = nn.ModuleList()
-        self.kpt_convs = nn.ModuleList()  # Keypoint branch
+        self.kpt_convs = nn.ModuleList()
         
         self.cls_preds = nn.ModuleList()
         self.reg_preds = nn.ModuleList()
-        self.kpt_preds = nn.ModuleList()  # Keypoint predictions
+        self.kpt_preds = nn.ModuleList()
         
         for ch in in_channels:
-            # Classification branch
             self.cls_convs.append(nn.Sequential(
                 Conv(ch, ch, 3, 1),
                 Conv(ch, ch, 3, 1)
             ))
             
-            # Regression branch
             self.reg_convs.append(nn.Sequential(
                 Conv(ch, ch, 3, 1),
                 Conv(ch, ch, 3, 1)
             ))
             
-            # Keypoint branch
             self.kpt_convs.append(nn.Sequential(
                 Conv(ch, ch, 3, 1),
                 Conv(ch, ch, 3, 1)
             ))
             
-            # Predictions
             self.cls_preds.append(nn.Conv2d(ch, num_classes, 1))
             self.reg_preds.append(nn.Conv2d(ch, 4 * reg_max, 1))
-            # Keypoints: x, y, visibility for each keypoint
             self.kpt_preds.append(nn.Conv2d(ch, num_keypoints * 3, 1))
         
         self._initialize_biases()
@@ -440,31 +370,25 @@ class PoseHead(nn.Module):
         features: Tuple[torch.Tensor, ...]
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
         """
-        Forward pass through pose head.
+        Forward pass.
         
         Args:
             features: Tuple of feature maps (N3, N4, N5) from neck
         
         Returns:
-            Tuple of (cls_outputs, reg_outputs, kpt_outputs):
-                cls_outputs: Classification predictions per scale
-                reg_outputs: Box regression predictions per scale
-                kpt_outputs: Keypoint predictions per scale (x, y, visibility)
+            Tuple of (cls_outputs, reg_outputs, kpt_outputs)
         """
         cls_outputs = []
         reg_outputs = []
         kpt_outputs = []
         
         for i, feat in enumerate(features):
-            # Classification branch
             cls_feat = self.cls_convs[i](feat)
             cls_out = self.cls_preds[i](cls_feat)
             
-            # Regression branch
             reg_feat = self.reg_convs[i](feat)
             reg_out = self.reg_preds[i](reg_feat)
             
-            # Keypoint branch
             kpt_feat = self.kpt_convs[i](feat)
             kpt_out = self.kpt_preds[i](kpt_feat)
             
@@ -496,13 +420,11 @@ class PoseHead(nn.Module):
         for kpt_out, anchor, stride in zip(kpt_outputs, anchors, strides):
             b, c, h, w = kpt_out.shape
             
-            # Reshape: (B, num_kpts*3, H, W) -> (B, H*W, num_kpts, 3)
             kpt_out = kpt_out.view(b, self.num_keypoints, 3, -1)
-            kpt_out = kpt_out.permute(0, 3, 1, 2)  # (B, H*W, num_kpts, 3)
+            kpt_out = kpt_out.permute(0, 3, 1, 2)
             
-            anchor = anchor.view(-1, 2)  # (H*W, 2)
+            anchor = anchor.view(-1, 2)
             
-            # Decode x, y relative to anchor
             xy = kpt_out[..., :2] * stride + anchor.unsqueeze(0).unsqueeze(2)
             visibility = kpt_out[..., 2:].sigmoid()
             
@@ -512,7 +434,6 @@ class PoseHead(nn.Module):
 
 
 if __name__ == "__main__":
-    # Test detection head
     in_channels = [128, 256, 512]
     
     print("Testing DetectionHead...")

@@ -1,5 +1,5 @@
 """
-Segmentation Loss for YOLOv8
+Segmentation Loss for YOLOv11
 Instance mask loss using BCE and Dice
 """
 
@@ -61,7 +61,7 @@ class DiceLoss(nn.Module):
 
 class SegmentationLoss(nn.Module):
     """
-    Instance Segmentation Loss for YOLOv8.
+    Instance Segmentation Loss for YOLOv11.
     
     Combines:
     - Binary Cross Entropy for pixel-wise classification

@@ -1,5 +1,5 @@
 """
-Non-Maximum Suppression for YOLOv8
+Non-Maximum Suppression for YOLOv11
 """
 
 import torch
