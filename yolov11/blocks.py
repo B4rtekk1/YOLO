@@ -127,6 +127,86 @@ class Bottleneck(nn.Module):
         return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
 
 
+class SE(nn.Module):
+    """
+    Squeeze-and-Excitation block for channel attention.
+    
+    Adaptively recalibrates channel-wise feature responses.
+    Reference: https://arxiv.org/abs/1709.01507
+    """
+    
+    def __init__(self, channels: int, reduction: int = 16):
+        super().__init__()
+        reduced = max(channels // reduction, 8)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, reduced, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(reduced, channels, bias=False),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, _, _ = x.shape
+        w = self.pool(x).view(b, c)
+        w = self.fc(w).view(b, c, 1, 1)
+        return x * w
+
+
+class ChannelAttention(nn.Module):
+    """Channel attention module for CBAM."""
+    
+    def __init__(self, channels: int, reduction: int = 16):
+        super().__init__()
+        reduced = max(channels // reduction, 8)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, reduced, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(reduced, channels, bias=False)
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, _, _ = x.shape
+        avg = self.avg_pool(x).view(b, c)
+        max_ = self.max_pool(x).view(b, c)
+        w = torch.sigmoid(self.fc(avg) + self.fc(max_)).view(b, c, 1, 1)
+        return x * w
+
+
+class SpatialAttention(nn.Module):
+    """Spatial attention module for CBAM."""
+    
+    def __init__(self, kernel_size: int = 7):
+        super().__init__()
+        self.conv = nn.Conv2d(2, 1, kernel_size, padding=kernel_size // 2, bias=False)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        avg = torch.mean(x, dim=1, keepdim=True)
+        max_, _ = torch.max(x, dim=1, keepdim=True)
+        w = torch.sigmoid(self.conv(torch.cat([avg, max_], dim=1)))
+        return x * w
+
+
+class CBAM(nn.Module):
+    """
+    Convolutional Block Attention Module.
+    Applies sequential channel and spatial attention.
+    Reference: https://arxiv.org/abs/1807.06521
+    """
+    
+    def __init__(self, channels: int, reduction: int = 16, kernel_size: int = 7):
+        super().__init__()
+        self.channel_attention = ChannelAttention(channels, reduction)
+        self.spatial_attention = SpatialAttention(kernel_size)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.channel_attention(x)
+        x = self.spatial_attention(x)
+        return x
+
+
 class C2f(nn.Module):
     """
     CSP Bottleneck with 2 convolutions.

@@ -12,7 +12,7 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 
-from .augmentations import Compose, LetterBox, RandomHSV, RandomFlip, Mosaic, ToTensor
+from .augmentations import Compose, LetterBox, RandomHSV, RandomFlip, Mosaic, MixUp, ToTensor
 
 
 class COCODataset(Dataset):
@@ -43,6 +43,7 @@ class COCODataset(Dataset):
         self.img_size = img_size
         self.augment = augment
         self.use_mosaic = mosaic and augment
+        self.use_mixup = augment  # MixUp after Mosaic
         
         with open(ann_file, 'r') as f:
             coco = json.load(f)
@@ -63,6 +64,7 @@ class COCODataset(Dataset):
         
         self.letterbox = LetterBox((img_size, img_size))
         self.mosaic = Mosaic(img_size) if self.use_mosaic else None
+        self.mixup = MixUp(alpha=32.0, p=0.15) if self.use_mixup else None  # 15% MixUp probability
         
         if augment:
             self.transforms = Compose([RandomHSV(), RandomFlip()])
@@ -75,9 +77,36 @@ class COCODataset(Dataset):
         return len(self.img_ids)
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict]:
+        # Apply Mosaic with 50% probability
         if self.use_mosaic and np.random.random() < 0.5:
-            return self._load_mosaic(idx)
-        return self._load_single(idx)
+            image, labels = self._load_mosaic(idx)
+        else:
+            image, labels = self._load_single(idx)
+        
+        # Apply MixUp after Mosaic (15% probability when enabled)
+        if self.mixup is not None and np.random.random() < 0.15:
+            # Get another random sample for MixUp
+            idx2 = np.random.randint(len(self))
+            if self.use_mosaic and np.random.random() < 0.5:
+                img2, labels2 = self._load_mosaic(idx2)
+            else:
+                img2, labels2 = self._load_single(idx2)
+            
+            # Convert to numpy for MixUp (it expects numpy)
+            if isinstance(image, torch.Tensor):
+                image = image.permute(1, 2, 0).numpy() * 255
+                image = image.astype(np.uint8)
+            if isinstance(img2, torch.Tensor):
+                img2 = img2.permute(1, 2, 0).numpy() * 255
+                img2 = img2.astype(np.uint8)
+            
+            image, labels = self.mixup(image, labels, img2, labels2)
+            
+            # Convert back to tensor if needed
+            if not isinstance(image, torch.Tensor):
+                image, labels = self.to_tensor(image, labels)
+        
+        return image, labels
     
     def _load_single(self, idx: int) -> Tuple[torch.Tensor, Dict]:
         img_id = self.img_ids[idx]

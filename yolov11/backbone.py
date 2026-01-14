@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from typing import Tuple, Dict, List
 
-from .blocks import Conv, C3k2, C2PSA, SPPF
+from .blocks import Conv, C3k2, C2PSA, SPPF, CBAM
 
 
 # Model scaling configurations: (depth_multiplier, width_multiplier)
@@ -33,21 +33,22 @@ def make_divisible(x: float, divisor: int = 8) -> int:
 
 class CSPDarknet(nn.Module):
     """
-    YOLOv11 Backbone (CSPDarknet with C3k2 + C2PSA)
+    YOLOv11 Backbone (CSPDarknet with C3k2 + C2PSA + optional CBAM)
     
     Architecture:
         P1: Conv 3x3 s=2 -> 320x320
         P2: Conv 3x3 s=2 + C3k2 -> 160x160
-        P3: Conv 3x3 s=2 + C3k2 -> 80x80   [output]
-        P4: Conv 3x3 s=2 + C3k2 -> 40x40   [output]
-        P5: Conv 3x3 s=2 + C3k2 + SPPF + C2PSA -> 20x20 [output]
+        P3: Conv 3x3 s=2 + C3k2 [+ CBAM] -> 80x80   [output]
+        P4: Conv 3x3 s=2 + C3k2 [+ CBAM] -> 40x40   [output]
+        P5: Conv 3x3 s=2 + C3k2 + SPPF + C2PSA [+ CBAM] -> 20x20 [output]
     
     Args:
         model_size: One of 'n', 's', 'm', 'l', 'x'
         in_channels: Input image channels (default: 3 for RGB)
+        use_cbam: Whether to use CBAM attention at output stages
     """
     
-    def __init__(self, model_size: str = 's', in_channels: int = 3):
+    def __init__(self, model_size: str = 's', in_channels: int = 3, use_cbam: bool = False):
         super().__init__()
         
         if model_size not in MODEL_SCALES:
@@ -59,6 +60,7 @@ class CSPDarknet(nn.Module):
         depths = [max(round(d * depth_mult), 1) for d in BASE_DEPTHS]
         
         self.out_channels = channels[2:]  # P3, P4, P5 channels
+        self.use_cbam = use_cbam
         
         # Stem
         self.stem = Conv(in_channels, channels[0], 3, 2)
@@ -88,6 +90,16 @@ class CSPDarknet(nn.Module):
             SPPF(channels[4], channels[4], kernel_size=5),
             C2PSA(channels[4], channels[4], n=1)
         )
+        
+        # Optional CBAM attention at output stages
+        if use_cbam:
+            self.cbam_p3 = CBAM(channels[2])
+            self.cbam_p4 = CBAM(channels[3])
+            self.cbam_p5 = CBAM(channels[4])
+        else:
+            self.cbam_p3 = None
+            self.cbam_p4 = None
+            self.cbam_p5 = None
         
         self._initialize_weights()
     
@@ -120,6 +132,14 @@ class CSPDarknet(nn.Module):
         p3 = self.stage2(x)
         p4 = self.stage3(p3)
         p5 = self.stage4(p4)
+        
+        # Apply CBAM if enabled
+        if self.cbam_p3 is not None:
+            p3 = self.cbam_p3(p3)
+        if self.cbam_p4 is not None:
+            p4 = self.cbam_p4(p4)
+        if self.cbam_p5 is not None:
+            p5 = self.cbam_p5(p5)
         
         return p3, p4, p5
     

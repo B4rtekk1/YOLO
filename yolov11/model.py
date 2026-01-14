@@ -46,7 +46,8 @@ class YOLOv11(nn.Module):
         model_size: str = 's',
         num_keypoints: int = 17,
         reg_max: int = 16,
-        input_size: int = 640
+        input_size: int = 640,
+        use_cbam: bool = False
     ):
         super().__init__()
         
@@ -62,12 +63,13 @@ class YOLOv11(nn.Module):
         self.num_keypoints = num_keypoints
         self.reg_max = reg_max
         self.input_size = input_size
+        self.use_cbam = use_cbam
         
         # Get depth multiplier for neck
         depth_mult, _ = MODEL_SCALES[model_size]
         
-        # Build backbone
-        self.backbone = CSPDarknet(model_size=model_size)
+        # Build backbone with optional CBAM
+        self.backbone = CSPDarknet(model_size=model_size, use_cbam=use_cbam)
         backbone_channels = self.backbone.get_out_channels()
         
         # Build neck
@@ -279,6 +281,51 @@ class YOLOv11(nn.Module):
             print(f"{'='*60}\n")
         
         return info
+    
+    def load_partial(self, state_dict: Dict[str, torch.Tensor], verbose: bool = True) -> Tuple[List[str], List[str]]:
+        """
+        Load weights from checkpoint with different architecture (partial loading).
+        
+        Useful for loading old weights into new architecture with additional modules (e.g., CBAM).
+        
+        Args:
+            state_dict: State dict from checkpoint
+            verbose: Whether to print loading info
+        
+        Returns:
+            Tuple of (loaded_keys, skipped_keys)
+        """
+        current_state = self.state_dict()
+        loaded_keys = []
+        skipped_keys = []
+        
+        for name, param in state_dict.items():
+            if name in current_state:
+                if current_state[name].shape == param.shape:
+                    current_state[name] = param
+                    loaded_keys.append(name)
+                else:
+                    skipped_keys.append(f"{name} (shape mismatch: {param.shape} vs {current_state[name].shape})")
+            else:
+                skipped_keys.append(f"{name} (not in current model)")
+        
+        # Find new keys not in checkpoint
+        new_keys = [k for k in current_state.keys() if k not in state_dict]
+        
+        self.load_state_dict(current_state)
+        
+        if verbose:
+            print(f"Loaded {len(loaded_keys)}/{len(state_dict)} weights from checkpoint")
+            if new_keys:
+                print(f"New layers (randomly initialized): {len(new_keys)}")
+                for k in new_keys[:5]:
+                    print(f"  - {k}")
+                if len(new_keys) > 5:
+                    print(f"  ... and {len(new_keys) - 5} more")
+            if skipped_keys:
+                print(f"Skipped keys: {len(skipped_keys)}")
+        
+        return loaded_keys, skipped_keys
 
 
 def create_model(

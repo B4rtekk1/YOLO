@@ -171,12 +171,21 @@ def validate(
             # NMS and Metrics processing
             results = non_max_suppression(predictions, conf_thres=0.001, iou_thres=0.6)
             
+            # Get image size for coordinate conversion
+            _, _, img_h, img_w = images.shape
+            
             for i, det in enumerate(results):
                 # Filter ground truth for this image
                 mask = targets['mask_gt'][i]
-                gt_boxes = targets['bboxes'][i][mask]
+                gt_boxes = targets['bboxes'][i][mask].clone()  # (M, 4) normalized xyxy
                 gt_labels = targets['labels'][i][mask]
                 
+                # Convert gt_boxes from normalized (0-1) to pixel coordinates
+                # gt_boxes are [x1, y1, x2, y2] in normalized format
+                gt_boxes[:, [0, 2]] *= img_w  # x coordinates
+                gt_boxes[:, [1, 3]] *= img_h  # y coordinates
+                
+                # det boxes are already in pixel coordinates from decode_boxes
                 metrics.process_batch(det, gt_boxes, gt_labels)
         
     n = len(dataloader)
@@ -247,6 +256,8 @@ def main():
     parser.add_argument('--warmup-epochs', type=int, default=3, help='Number of warmup epochs')
     parser.add_argument('--label-smoothing', type=float, default=0.0, help='Label smoothing factor (0.0-0.1)')
     parser.add_argument('--copypaste', type=float, default=0.0, help='CopyPaste augmentation probability')
+    parser.add_argument('--use-cbam', action='store_true', help='Use CBAM attention in backbone')
+    parser.add_argument('--partial-load', action='store_true', help='Allow partial weight loading (for architecture changes)')
     args = parser.parse_args()
     
     # Multi-GPU Setup at the very beginning
@@ -289,10 +300,12 @@ def main():
         print(f'Saving to: {save_dir}')
     
     # Create model
-    model = create_model(
+    from yolov11.model import YOLOv11
+    model = YOLOv11(
         num_classes=args.num_classes,
         task=args.task,
-        model_size=args.model
+        model_size=args.model,
+        use_cbam=args.use_cbam
     ).to(device)
     
     if distributed:
@@ -352,12 +365,21 @@ def main():
     # Resume from checkpoint
     start_epoch = 0
     if args.resume:
-        checkpoint = torch.load(args.resume, map_location=device)
-        (model.module if hasattr(model, 'module') else model).load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
-        if rank in [-1, 0]:
-            print(f'Resumed from epoch {start_epoch}')
+        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+        base_model = model.module if hasattr(model, 'module') else model
+        
+        if args.partial_load:
+            # Partial loading for architecture changes (e.g., adding CBAM)
+            base_model.load_partial(checkpoint['model_state_dict'])
+            if rank in [-1, 0]:
+                print(f'Partially loaded weights from {args.resume}')
+        else:
+            # Standard loading
+            base_model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1
+            if rank in [-1, 0]:
+                print(f'Resumed from epoch {start_epoch}')
     
     # Mixed precision scaler
     # Use torch.amp.GradScaler for newer PyTorch versions
