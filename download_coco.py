@@ -33,6 +33,17 @@ def download_file(url: str, dest: str) -> bool:
         return False
 
 
+def verify_image(path):
+    """Verify if image file is valid."""
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            img.verify()
+        return True
+    except:
+        return False
+
+
 def download_image(args):
     """Download a single image (for ThreadPoolExecutor)."""
     img_info, dest_dir, base_url = args
@@ -40,10 +51,22 @@ def download_image(args):
     url = f"{base_url}/{filename}"
     dest_path = dest_dir / filename
     
+    # Check if file exists AND is valid
     if dest_path.exists():
-        return True
+        if verify_image(dest_path):
+            return True
+        else:
+            # Remove corrupted file and re-download
+            dest_path.unlink()
     
-    return download_file(url, str(dest_path))
+    success = download_file(url, str(dest_path))
+    
+    # Verify after download
+    if success and not verify_image(dest_path):
+        dest_path.unlink()
+        return False
+    
+    return success
 
 
 def download_coco_subset(

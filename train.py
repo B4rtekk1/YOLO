@@ -25,8 +25,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 from yolov11.model import YOLOv11, create_model
 from yolov11.losses import YOLOv11Loss
 from yolov11.data import create_dataloader
-from yolov11.utils.metrics import Metrics
-from yolov11.utils.nms import non_max_suppression
 from yolov11.utils.training import ModelEMA, WarmupScheduler
 
 
@@ -117,14 +115,14 @@ def validate(
     criterion: nn.Module,
     device: torch.device
 ) -> dict:
-    """Validate model."""
+    """
+    Validate model (loss only).
+    For accurate mAP evaluation, use validate.py with pycocotools.
+    """
     model.eval()
     
     total_loss = 0
     loss_items = {'loss_box': 0, 'loss_cls': 0, 'loss_dfl': 0}
-    
-    # Create metrics calculator
-    metrics = Metrics()
     
     rank = int(os.environ.get('RANK', -1))
     
@@ -142,79 +140,27 @@ def validate(
         for k in loss_items:
             if k in loss_dict:
                 loss_items[k] += loss_dict[k].item()
-        
-        # Performance evaluation (mAP)
-        # Reconstruct predictions for NMS
-        # Use 'getattr' to keep Pyright happy while accessing YOLOv11 specific methods
-        m = model.module if hasattr(model, 'module') else model
-        get_anchors = getattr(m, 'get_anchors', None)
-        head = getattr(m, 'head', None)
-        
-        if get_anchors and head and hasattr(head, 'decode_boxes'):
-            # Handle model outputs
-            cls_outputs, reg_outputs = outputs['cls'], outputs['reg']
-            strides = outputs['strides']
-            anchors = get_anchors(device)
-            
-            # Decode boxes
-            decoded_boxes = head.decode_boxes(reg_outputs, anchors, strides)
-            
-            # Format for NMS
-            cls_preds = []
-            for cls in cls_outputs:
-                b, c, fh, fw = cls.shape
-                cls_preds.append(cls.view(b, c, -1))
-            cls_preds = torch.cat(cls_preds, dim=-1).permute(0, 2, 1).sigmoid()
-            
-            predictions = torch.cat([decoded_boxes, cls_preds], dim=-1)
-            
-            # NMS and Metrics processing
-            results = non_max_suppression(predictions, conf_thres=0.001, iou_thres=0.6)
-            
-            # Get image size for coordinate conversion
-            _, _, img_h, img_w = images.shape
-            
-            for i, det in enumerate(results):
-                # Filter ground truth for this image
-                mask = targets['mask_gt'][i]
-                gt_boxes = targets['bboxes'][i][mask].clone()  # (M, 4) normalized xyxy
-                gt_labels = targets['labels'][i][mask]
-                
-                # Convert gt_boxes from normalized (0-1) to pixel coordinates
-                # gt_boxes are [x1, y1, x2, y2] in normalized format
-                gt_boxes[:, [0, 2]] *= img_w  # x coordinates
-                gt_boxes[:, [1, 3]] *= img_h  # y coordinates
-                
-                # det boxes are already in pixel coordinates from decode_boxes
-                metrics.process_batch(det, gt_boxes, gt_labels)
-        
-    n = len(dataloader)
-    m = metrics.compute()
     
-    # In DDP, we should ideally aggregate metrics across GPUs
+    n = len(dataloader)
+    if n == 0:
+        return {'val_loss': 0, 'mAP50': 0, 'mAP50-95': 0}
+    
+    # In DDP, aggregate loss
     if dist.is_initialized():
-        # Aggregate loss
         loss_tensor = torch.tensor([total_loss, n], device=device)
         dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
         avg_val_loss = loss_tensor[0] / max(1, loss_tensor[1].item())
-        
-        # Aggregate mAP (simplified: average mAP across ranks)
-        # A more precise way would be to gather detections and re-compute AP
-        map_tensor = torch.tensor([m['mAP50'], m['mAP50-95']], device=device)
-        dist.all_reduce(map_tensor, op=dist.ReduceOp.SUM)
-        map_tensor /= dist.get_world_size()
-        
         return {
             'val_loss': avg_val_loss.item(),
-            'mAP50': map_tensor[0].item(),
-            'mAP50-95': map_tensor[1].item()
+            'mAP50': 0,  # Use validate.py for accurate mAP
+            'mAP50-95': 0
         }
     
     return {
         'val_loss': total_loss / n,
         **{f'val_{k}': v / max(1, n) for k, v in loss_items.items()},
-        'mAP50': m['mAP50'],
-        'mAP50-95': m['mAP50-95']
+        'mAP50': 0,  # Use validate.py for accurate mAP
+        'mAP50-95': 0
     }
 
 
@@ -240,7 +186,8 @@ def main():
     parser.add_argument('--task', type=str, default='detect', choices=['detect', 'segment', 'pose'])
     parser.add_argument('--model', type=str, default='s', choices=['n', 's', 'm', 'l', 'x'])
     parser.add_argument('--data', type=str, required=True, help='Path to data directory')
-    parser.add_argument('--ann', type=str, default=None, help='Path to COCO annotation file')
+    parser.add_argument('--ann', type=str, default=None, help='Path to COCO training annotation file')
+    parser.add_argument('--val-ann', type=str, default=None, help='Path to COCO validation annotation file (separate from training)')
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch', type=int, default=16)
     parser.add_argument('--img-size', type=int, default=640)
@@ -258,6 +205,7 @@ def main():
     parser.add_argument('--copypaste', type=float, default=0.0, help='CopyPaste augmentation probability')
     parser.add_argument('--use-cbam', action='store_true', help='Use CBAM attention in backbone')
     parser.add_argument('--partial-load', action='store_true', help='Allow partial weight loading (for architecture changes)')
+    parser.add_argument('--reset-lr', action='store_true', help='Reset learning rate when resuming (ignore saved optimizer LR)')
     args = parser.parse_args()
     
     # Multi-GPU Setup at the very beginning
@@ -376,10 +324,16 @@ def main():
         else:
             # Standard loading
             base_model.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             start_epoch = checkpoint['epoch'] + 1
-            if rank in [-1, 0]:
-                print(f'Resumed from epoch {start_epoch}')
+            
+            if args.reset_lr:
+                # Don't load optimizer state - use fresh LR from args
+                if rank in [-1, 0]:
+                    print(f'Resumed from epoch {start_epoch} with RESET learning rate: {args.lr}')
+            else:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                if rank in [-1, 0]:
+                    print(f'Resumed from epoch {start_epoch}')
     
     # Mixed precision scaler
     # Use torch.amp.GradScaler for newer PyTorch versions
@@ -404,8 +358,9 @@ def main():
     
     # Create val dataloader if annotations provided or auto-detected
     val_loader = None
-    if args.ann:
-        val_ann = args.ann
+    if args.val_ann:
+        # Use explicitly provided validation annotations
+        val_ann = args.val_ann
     else:
         # Try to auto-detect coco_mini val set
         val_ann_path = Path(args.data) / "annotations/instances_val2017.json"
