@@ -1,6 +1,24 @@
 """
-YOLOv11 Detection Heads
-Supports Detection, Segmentation, and Pose Estimation
+yolov11.head – Task-Specific Prediction Heads
+===============================================
+
+All three heads share the same decoupled design:
+
+* **Classification branch** – two 3×3 Conv blocks followed by a 1×1 Conv
+  that outputs ``num_classes`` logits per anchor point.
+* **Regression branch** – two 3×3 Conv blocks followed by a 1×1 Conv that
+  outputs ``4 * reg_max`` logits per anchor point (DFL distribution).
+* **Task branch** (segmentation / pose only) – additional 1×1 Conv for mask
+  coefficients or keypoint coordinates.
+
+All heads are anchor-free: predictions are made at every grid cell of the
+three feature-map scales (stride 8, 16, 32).
+
+Classes
+-------
+* :class:`DetectionHead`    – object detection.
+* :class:`SegmentationHead` – instance segmentation (adds prototype masks).
+* :class:`PoseHead`         – human pose estimation (adds 17 COCO keypoints).
 """
 
 import torch
@@ -77,7 +95,15 @@ class DetectionHead(nn.Module):
         self._initialize_biases()
     
     def _initialize_biases(self):
-        """Initialize prediction biases for training stability."""
+        """Initialise classification prediction biases for training stability.
+
+        Sets the initial bias so that the sigmoid output corresponds to a
+        prior detection probability of ~1 % (``p = 0.01``).  This prevents
+        the model from producing large losses on the very first forward pass
+        when all predictions are near 0.5.
+
+        Formula: ``bias = -log((1 - p) / p)`` where ``p = 0.01``.
+        """
         for cls_pred in self.cls_preds:
             b = cls_pred.bias.view(-1, )
             b.data.fill_(-math.log((1 - 0.01) / 0.01))  # Prior probability 0.01

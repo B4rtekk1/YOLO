@@ -1,6 +1,38 @@
 """
-Dataset Loaders for YOLOv11
-Supports COCO and YOLO format datasets
+yolov11.data.dataset \u2013 Dataset Loaders
+========================================
+
+Provides :class:`torch.utils.data.Dataset` implementations for two common
+annotation formats, plus a :func:`create_dataloader` factory.
+
+Supported formats
+-----------------
+* **COCO JSON** (:class:`COCODataset`) \u2013 standard ``instances_*.json`` format
+  with ``images``, ``annotations``, and ``categories`` keys.  Supports
+  detection, segmentation (polygon / RLE), and pose (17-keypoint COCO).
+* **YOLO TXT** (:class:`YOLODataset`) \u2013 one ``.txt`` label file per image,
+  each line: ``<class> <x_center> <y_center> <width> <height>`` (normalised).
+
+Augmentation pipeline (training)
+---------------------------------
+::
+
+    50% Mosaic (4-image)
+        \u2514\u2500 15% MixUp (blends two mosaic images)
+    LetterBox (pad to square, preserve aspect ratio)
+    RandomHSV (hue / saturation / value jitter)
+    RandomFlip (horizontal)
+    ToTensor (HWC uint8 \u2192 CHW float32, /255)
+
+Label dict keys
+---------------
+All datasets return a ``labels`` dict with:
+
+* ``bboxes``  \u2013 ``(N, 4)`` float32 in xyxy pixel coordinates.
+* ``labels``  \u2013 ``(N,)`` int64 class indices.
+* ``image_id`` \u2013 original COCO image ID (COCODataset only).
+* ``keypoints`` \u2013 ``(N, 17, 3)`` float32 x/y/visibility (pose task only).
+* ``masks``    \u2013 ``(N, H, W)`` float32 binary masks (segment task only).
 """
 
 import os

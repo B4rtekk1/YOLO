@@ -1,6 +1,57 @@
 """
-YOLOv11 Training Script
-Supports training for detection, segmentation, and pose estimation
+train.py \u2013 YOLOv11 Training Script
+=====================================
+
+End-to-end training script supporting single-GPU, multi-GPU (DataParallel),
+and distributed multi-GPU (DistributedDataParallel / torchrun) training for
+all three YOLOv11 tasks: detection, instance segmentation, and pose estimation.
+
+Training pipeline
+-----------------
+1. Parse CLI arguments and initialise the distributed process group (if any).
+2. Build :class:`~yolov11.model.YOLOv11` and optionally wrap in DDP.
+3. Optionally compile the model with ``torch.compile`` (PyTorch 2.0+).
+4. Create :class:`~yolov11.losses.YOLOv11Loss` with the requested task.
+5. Set up SGD + cosine-annealing LR scheduler.
+6. Create train / val :class:`~torch.utils.data.DataLoader` instances.
+7. Optionally resume from a checkpoint (full or partial weight loading).
+8. Initialise :class:`~yolov11.utils.training.ModelEMA` and
+   :class:`~yolov11.utils.training.WarmupScheduler`.
+9. Run the training loop:
+   - :func:`train_one_epoch` with AMP, gradient scaling, warmup, and EMA.
+   - :func:`validate` every 5 epochs using the EMA model.
+   - Save ``best.pt`` (EMA, highest score) and ``last.pt`` (raw model).
+
+CLI reference
+-------------
+::
+
+    python train.py \\
+        --task detect          # detect | segment | pose
+        --model s              # n | s | m | l | x
+        --data /path/to/data   # root directory of images
+        --ann  /path/to/train_annotations.json   # COCO format (optional)
+        --val-ann /path/to/val_annotations.json  # separate val set (optional)
+        --epochs 100
+        --batch  16            # total batch size (divided across GPUs)
+        --img-size 640
+        --lr 0.01
+        --workers 4
+        --device 0             # GPU index, or 'cpu'
+        --resume /path/best.pt # resume from checkpoint
+        --save-dir runs/train
+        --num-classes 80
+        --compile              # torch.compile (PyTorch 2.0+, ~20-50% speedup)
+        --ema-decay 0.9999
+        --warmup-epochs 3
+        --label-smoothing 0.0
+        --use-cbam             # enable CBAM attention in backbone
+
+Distributed training (torchrun)
+--------------------------------
+::
+
+    torchrun --nproc_per_node=4 train.py --batch 64 --data /path/to/data ...
 """
 
 import os

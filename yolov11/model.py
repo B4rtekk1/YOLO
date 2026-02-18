@@ -1,6 +1,25 @@
 """
-YOLOv11 Main Model
-Combines backbone, neck, and task-specific heads
+yolov11.model – YOLOv11 Unified Model
+=======================================
+
+This module wires the backbone, neck, and task-specific head into a single
+:class:`YOLOv11` ``nn.Module`` and exposes a :func:`create_model` factory.
+
+Forward-pass output format
+--------------------------
+The model returns a ``dict`` during training/evaluation and a flat ``list``
+during ONNX/TorchScript export (to avoid Python dicts in traced graphs).
+
+==========  ======================================================
+Task        Keys in output dict
+==========  ======================================================
+detect      ``cls`` (list), ``reg`` (list), ``strides`` (list)
+segment     ``cls``, ``reg``, ``mask``, ``proto``, ``strides``
+pose        ``cls``, ``reg``, ``kpt``, ``strides``
+==========  ======================================================
+
+Each ``cls`` / ``reg`` / ``mask`` / ``kpt`` entry is a list of three tensors,
+one per detection scale (stride 8, 16, 32).
 """
 
 import torch
@@ -191,7 +210,18 @@ class YOLOv11(nn.Module):
         return [getattr(self, f'anchor_grid_{s}').to(device) for s in self.strides]
     
     def fuse(self):
-        """Fuse Conv2d + BatchNorm2d layers for inference optimization."""
+        """Fuse Conv2d + BatchNorm2d layers for faster inference.
+
+        After fusion the BN statistics are absorbed into the Conv weights so
+        that the forward pass skips the BN computation entirely.  This gives
+        a ~5-10 % speed-up at inference time with no change in accuracy.
+
+        The method is idempotent: calling it twice is safe (second call is a
+        no-op with a warning).
+
+        Returns:
+            ``self`` (for method chaining, e.g. ``model.fuse().eval()``).
+        """
         if not hasattr(self, 'fused'):
             self.fused = False
             
@@ -212,7 +242,28 @@ class YOLOv11(nn.Module):
     
     @staticmethod
     def _fuse_conv_bn(conv: nn.Conv2d, bn: nn.BatchNorm2d) -> nn.Conv2d:
-        """Fuse convolution and batch normalization layers."""
+        """Mathematically fuse a Conv2d and its following BatchNorm2d.
+
+        BatchNorm normalises its input as:
+
+        .. math::
+
+            y = \\frac{x - \\mu}{\\sqrt{\\sigma^2 + \\varepsilon}} \\cdot \\gamma + \\beta
+
+        When preceded by a convolution ``z = W * x + b``, the two operations
+        can be collapsed into a single convolution with fused weights::
+
+            W_fused = W * (gamma / std)   (broadcast over output channels)
+            b_fused = (b - mean) * gamma / std + beta
+
+        Args:
+            conv: Convolution layer (bias may be absent).
+            bn:   BatchNorm2d layer whose statistics are used for fusion.
+
+        Returns:
+            A new :class:`nn.Conv2d` with fused weights and bias, ready for
+            inference without a separate BN pass.
+        """
         # Get parameters
         w_conv = conv.weight
         if conv.bias is not None:

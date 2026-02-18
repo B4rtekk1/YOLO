@@ -10,23 +10,44 @@ from typing import Dict, List, Tuple, Optional
 
 from .box_loss import CIoULoss, DFLoss, bbox_iou
 from .cls_loss import ClassificationLoss, VarifocalLoss
+from .enhanced_loss import WiseIoULoss, QualityFocalLoss
 from .seg_loss import SegmentationLoss
 from .pose_loss import PoseLoss
 
 
 class TaskAlignedAssigner(nn.Module):
     """
-    Task-Aligned Assigner for YOLOv11.
-    
-    Assigns ground truth targets to anchor points based on both
-    classification and localization quality.
-    
-    alignment_metric = cls_score^alpha * iou^beta
-    
+    Task-Aligned Label Assignment for anchor-free detection.
+
+    Assigns ground-truth boxes to anchor points by ranking candidate anchors
+    using a unified alignment score that balances classification confidence
+    and localisation quality:
+
+    .. math::
+
+        s_i = p_{c,i}^{\\alpha} \\cdot \\text{IoU}(b_i, b_{gt})^{\\beta}
+
+    Algorithm
+    ---------
+    1. For each ground-truth box, compute the alignment score for every anchor
+       that falls *inside* the GT box.
+    2. Select the top-*k* anchors per GT as positives.
+    3. Resolve conflicts when an anchor is assigned to multiple GTs by keeping
+       the assignment with the highest alignment score.
+    4. Compute soft classification targets as the normalised alignment scores
+       (encourages the model to predict high confidence only for well-localised
+       detections).
+
     Args:
-        topk: Maximum number of anchors to assign per GT
-        alpha: Classification score weight
-        beta: IoU weight
+        topk: Maximum number of anchors assigned per ground-truth box.
+        num_classes: Number of object categories.
+        alpha: Exponent for the classification score term.
+        beta: Exponent for the IoU term.
+        eps: Small constant for numerical stability.
+
+    References:
+        - TOOD: Task-aligned One-stage Object Detection (Feng et al., 2021)
+          https://arxiv.org/abs/2108.07755
     """
     
     def __init__(
@@ -306,8 +327,10 @@ class YOLOv11Loss(nn.Module):
         )
         
         # Loss functions
-        self.bce_loss = nn.BCEWithLogitsLoss(reduction='none')
-        self.ciou_loss = CIoULoss(reduction='none')
+        # self.bce_loss = nn.BCEWithLogitsLoss(reduction='none') 
+        self.qfl_loss = QualityFocalLoss(reduction='none')
+        # self.ciou_loss = CIoULoss(reduction='none')
+        self.wise_iou = WiseIoULoss()
         self.dfl_loss = DFLoss(reg_max)
         
         if task == 'segment':
@@ -368,13 +391,24 @@ class YOLOv11Loss(nn.Module):
             target_scores = target_scores * (1 - self.label_smoothing) + self.label_smoothing / self.num_classes
         
         # Classification loss
-        loss_cls = self.bce_loss(cls_flat, target_scores).sum() / target_scores_sum
+        # Use QualityFocalLoss instead of standard BCE
+        # Extract quality scores from target_scores (max value per anchor)
+        # target_scores is (B, N, C), one-hot scaled by quality
+        quality_scores, _ = target_scores.max(dim=-1)
+        
+        # Flatten for QFL
+        loss_cls = self.qfl_loss(
+            cls_flat.view(-1, self.num_classes), 
+            target_labels.view(-1),
+            quality=quality_scores.view(-1)
+        ).sum() / target_scores_sum
         
         # Box losses (only for foreground)
         if fg_mask.any():
-            loss_box = self.ciou_loss(
+            loss_box = self.wise_iou(
                 pred_bboxes[fg_mask],
-                target_bboxes[fg_mask]
+                target_bboxes[fg_mask],
+                reduction='none'
             )
             loss_box = (loss_box * target_scores[fg_mask].sum(-1)).sum() / target_scores_sum
             

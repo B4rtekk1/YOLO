@@ -457,7 +457,7 @@ def main():
         
         # Periodic Evaluation every 5 epochs using EMA model
         eval_metrics = {}
-        if val_loader and (epoch + 1) % 5 == 0:
+        if val_loader and (epoch + 1) % 200 == 0:
             val_model = ema.ema if ema else model
             eval_metrics = validate(val_model, val_loader, criterion, device)
             print(f'Evaluation Epoch {epoch+1}: mAP50={eval_metrics["mAP50"]:.4f}, '

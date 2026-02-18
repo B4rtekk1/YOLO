@@ -1,5 +1,20 @@
 """
-Non-Maximum Suppression for YOLOv11
+yolov11.utils.nms – Non-Maximum Suppression
+============================================
+
+Post-processing utilities that filter redundant bounding-box predictions.
+
+Algorithm (standard NMS)
+------------------------
+1. Filter all predictions below *conf_thres*.
+2. For each class, sort remaining predictions by confidence (descending).
+3. Greedily keep the highest-confidence box and suppress all boxes with
+   IoU > *iou_thres* relative to it.
+4. Repeat until no boxes remain.
+
+The implementation uses ``torchvision.ops.nms`` (CUDA-accelerated when
+available) and applies a class-offset trick to perform batched NMS across
+all classes in a single call.
 """
 
 import torch
@@ -55,26 +70,28 @@ def non_max_suppression(
     output = [torch.zeros((0, 6), device=predictions.device)] * batch_size
     
     for xi, x in enumerate(predictions):
-        # Filter by confidence
+        # Filter by confidence: keep only anchors where any class score > conf_thres
         xc = x[:, 4:].amax(1) > conf_thres
         x = x[xc]
         
         if not x.shape[0]:
             continue
         
-        # Compute confidence
+        # Separate box coordinates from class scores
         box = x[:, :4]
         cls_scores = x[:, 4:]
         
         if multi_label:
+            # Allow a single box to be detected as multiple classes
             i, j = (cls_scores > conf_thres).nonzero(as_tuple=False).T
             x = torch.cat([box[i], cls_scores[i, j, None], j[:, None].float()], 1)
         else:
+            # Single label: keep only the highest-scoring class per box
             conf, j = cls_scores.max(1, keepdim=True)
             x = torch.cat([box, conf, j.float()], 1)
             x = x[conf.view(-1) > conf_thres]
         
-        # Filter by class
+        # Filter by class whitelist
         if classes is not None:
             x = x[(x[:, 5:6] == torch.tensor(classes, device=x.device)).any(1)]
         
@@ -82,10 +99,11 @@ def non_max_suppression(
         if not n:
             continue
         
-        # Sort by confidence
+        # Sort by confidence and cap at max_nms to avoid OOM
         x = x[x[:, 4].argsort(descending=True)[:max_nms]]
         
-        # Batched NMS
+        # Batched NMS: offset boxes by class index so different classes
+        # never suppress each other (they will have non-overlapping coordinates)
         c = x[:, 5:6] * max_wh
         boxes, scores = x[:, :4] + c, x[:, 4]
         

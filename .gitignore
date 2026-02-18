@@ -3,7 +3,9 @@
 __pycache__
 *.jpg
 *.png
-*.mp4
+film.mp4
 *.pt
 *.onnx
 *.engine
+*.ipynb
+yolov11.zip

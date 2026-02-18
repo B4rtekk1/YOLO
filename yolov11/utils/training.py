@@ -1,6 +1,19 @@
 """
-Training Utilities for YOLOv11
-Includes: EMA, Progressive Resizing, Learning Rate Schedulers
+yolov11.utils.training – Training Helper Utilities
+===================================================
+
+Provides auxiliary classes that improve training stability and final accuracy:
+
+* :class:`ModelEMA` – Exponential Moving Average of model weights.  The EMA
+  model is used for evaluation and saved as ``best.pt``; it typically yields
+  0.1-0.5 mAP improvement over the raw model.
+* :class:`WarmupScheduler` – Linear LR warm-up for the first N epochs to
+  prevent early divergence with large batch sizes.
+* :class:`CosineAnnealingWarmRestarts` – Cosine LR schedule with periodic
+  restarts (SGDR) for escaping local minima.
+* :class:`ProgressiveResizing` – Gradually increases image resolution during
+  training for faster early convergence and better final accuracy.
+* :class:`EarlyStopping` – Halts training when validation metric stagnates.
 """
 
 import torch
@@ -50,7 +63,20 @@ class ModelEMA:
             p.requires_grad_(False)
     
     def update(self, model: nn.Module):
-        """Update EMA weights."""
+        """Update the EMA shadow weights from the current model parameters.
+
+        Uses a warmup-adjusted decay so that early updates have a smaller
+        decay factor (i.e. the EMA tracks the model more closely at the start
+        of training when the weights are still changing rapidly):
+
+        .. code-block:: text
+
+            d = decay * (1 - exp(-updates / tau))
+            ema_weight = d * ema_weight + (1 - d) * model_weight
+
+        Args:
+            model: The live training model (may be wrapped in DDP/DataParallel).
+        """
         with torch.no_grad():
             self.updates += 1
             

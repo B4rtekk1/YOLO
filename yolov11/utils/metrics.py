@@ -1,5 +1,16 @@
 """
-Evaluation Metrics for YOLOv11
+yolov11.utils.metrics – Detection & Pose Evaluation Metrics
+============================================================
+
+Provides functions and classes for computing standard COCO-style metrics:
+
+* :func:`compute_iou`          – Pairwise IoU between two sets of boxes.
+* :func:`compute_ap`           – Average Precision via 101-point interpolation.
+* :func:`compute_ap_per_class` – Per-class AP, precision, and recall.
+* :func:`compute_oks`          – Object Keypoint Similarity for pose evaluation.
+* :class:`ConfusionMatrix`     – Detection confusion matrix.
+* :func:`match_predictions`    – Match predictions to GT across IoU thresholds.
+* :class:`Metrics`             – Accumulates stats and computes mAP50 / mAP50-95.
 """
 
 import torch
@@ -24,7 +35,20 @@ def compute_iou(box1: torch.Tensor, box2: torch.Tensor) -> torch.Tensor:
 
 
 def compute_ap(recall: np.ndarray, precision: np.ndarray) -> float:
-    """Compute Average Precision using 101-point interpolation."""
+    """Compute Average Precision using 101-point interpolation (COCO standard).
+
+    The precision-recall curve is first made monotonically decreasing (envelope),
+    then sampled at 101 evenly-spaced recall thresholds in [0, 1].  The AP is
+    the mean of the interpolated precision values, equivalent to the area under
+    the precision-recall curve.
+
+    Args:
+        recall:    1-D array of recall values, sorted ascending.
+        precision: 1-D array of precision values corresponding to *recall*.
+
+    Returns:
+        Scalar AP value in [0, 1].
+    """
     mrec = np.concatenate([[0.0], recall, [1.0]])
     mpre = np.concatenate([[1.0], precision, [0.0]])
     

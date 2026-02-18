@@ -1,8 +1,32 @@
 """
-Model Export Utilities for YOLOv11
-Supports: ONNX, TensorRT (optional), INT8 Quantization (optional)
+yolov11.utils.export – Model Export & Quantization
+====================================================
 
-Note: TensorRT requires tensorrt package installed separately.
+Exports a trained YOLOv11 model to deployment-ready formats and provides
+PyTorch-native quantization utilities.
+
+Supported export formats
+------------------------
+
+==========  ========================  =============================================
+Format      Function / Class          Notes
+==========  ========================  =============================================
+ONNX        :func:`export_onnx`       Requires ``onnx``; optional ``onnx-simplifier``
+TensorRT    :func:`export_tensorrt`   Requires ``tensorrt`` (NVIDIA only)
+INT8 dyn.   :func:`quantize_dynamic`  CPU-only; quantises ``nn.Linear`` layers
+INT8 stat.  :func:`quantize_static`   Requires calibration data
+==========  ========================  =============================================
+
+Typical workflow
+----------------
+::
+
+    model = YOLOv11(...).eval()
+    model.fuse()                                  # merge BN into Conv
+    export_onnx(model, 'yolov11s.onnx')           # ONNX export
+    export_tensorrt('yolov11s.onnx', 'yolov11s')  # TRT engine (GPU required)
+
+Note: TensorRT requires the ``tensorrt`` package installed separately.
       Quantization uses PyTorch native quantization.
 """
 

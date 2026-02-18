@@ -1,6 +1,22 @@
 """
-YOLOv11 Neck - PANet (Path Aggregation Network)
-Combines FPN (top-down) and PAN (bottom-up) pathways with C3k2 blocks
+yolov11.neck – PANet Feature Pyramid Neck
+==========================================
+
+Implements the Path Aggregation Network (PANet) that fuses multi-scale
+features from the backbone into three output feature maps used by the
+detection/segmentation/pose heads.
+
+Two complementary pathways are used:
+
+* **FPN (top-down)** – high-level semantic information flows *down* from P5
+  to P3 via lateral connections and upsampling, enriching small-object
+  feature maps with context.
+* **PAN (bottom-up)** – fine-grained spatial information flows *up* from N3
+  to N5 via strided convolutions, enriching large-object feature maps with
+  precise localisation cues.
+
+Each fusion step uses a :class:`~yolov11.blocks.C3k2` block (the YOLOv11
+efficient CSP bottleneck) instead of the plain C2f used in YOLOv8.
 """
 
 import torch
@@ -59,7 +75,7 @@ class PANet(nn.Module):
         self._initialize_weights()
     
     def _initialize_weights(self):
-        """Initialize model weights."""
+        """Initialise Conv2d (Kaiming Normal) and BatchNorm2d (identity) weights."""
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -106,7 +122,11 @@ class PANet(nn.Module):
         return fpn_n3, pan_n4, pan_n5
     
     def get_out_channels(self) -> List[int]:
-        """Get output channel sizes."""
+        """Return output channel counts ``[C_N3, C_N4, C_N5]``.
+
+        The values equal the backbone's P3/P4/P5 channel counts because the
+        PANet preserves channel width at each scale.
+        """
         return self.out_channels
 
 

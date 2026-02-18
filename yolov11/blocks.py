@@ -1,6 +1,32 @@
 """
-YOLOv11 Building Blocks
-Core components: C3k2 (efficient CSP), C2PSA (spatial attention), and standard blocks
+yolov11.blocks – Core Neural-Network Building Blocks
+=====================================================
+
+This module contains every reusable layer used throughout the YOLOv11
+architecture.  All blocks follow the same convention:
+
+* Input/output tensors are in NCHW format ``(B, C, H, W)``.
+* Padding is computed automatically by :func:`autopad` to preserve spatial
+  dimensions unless a stride > 1 is requested.
+* Activation is SiLU (Swish) by default, matching the original YOLO series.
+
+Block hierarchy
+---------------
+::
+
+    Conv  (Conv2d + BN + SiLU)          ← fundamental unit
+    ├─ DWConv  (depthwise Conv)
+    Bottleneck  (1×1 → 3×3 [+ residual])
+    ├─ C2f   (CSP with 2 convs, YOLOv8)
+    ├─ C3k   (CSP with 3 convs, custom kernel)
+    └─ C3k2  (YOLOv11 efficient CSP)     ← main backbone block
+    SPPF  (Spatial Pyramid Pooling – Fast)
+    C2PSA (CSP + Spatial Attention)      ← P5 attention block
+    Attention  (multi-head self-attention, Flash Attention when available)
+    SE    (Squeeze-and-Excitation)
+    CBAM  (Channel + Spatial attention)
+    DFL   (Distribution Focal Loss decode layer)
+    Proto (mask prototype generator for segmentation)
 """
 
 import torch
@@ -10,7 +36,20 @@ from typing import Optional, List
 
 
 def autopad(kernel_size: int, padding: Optional[int] = None, dilation: int = 1) -> int:
-    """Calculate padding to maintain spatial dimensions."""
+    """Compute 'same' padding for a convolution so spatial size is preserved.
+
+    When *padding* is ``None`` the function returns the padding required to
+    keep ``H_out == H_in`` (and ``W_out == W_in``) for stride-1 convolutions.
+    For strided convolutions the caller should pass an explicit value.
+
+    Args:
+        kernel_size: Convolution kernel size (assumed square).
+        padding: Explicit padding override.  If ``None``, auto-computed.
+        dilation: Dilation factor (default 1 = no dilation).
+
+    Returns:
+        Integer padding value.
+    """
     if padding is None:
         padding = (kernel_size - 1) // 2 * dilation
     return padding
@@ -52,7 +91,11 @@ class Conv(nn.Module):
         return self.act(self.bn(self.conv(x)))
     
     def forward_fuse(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass without batch norm (for fused inference)."""
+        """Forward pass with BatchNorm fused into Conv2d weights (inference only).
+
+        Called automatically after :meth:`YOLOv11.fuse` replaces ``self.bn``
+        with ``nn.Identity``.  Avoids a separate BN pass for ~5 % speedup.
+        """
         return self.act(self.conv(x))
 
 
@@ -332,10 +375,14 @@ class DFL(nn.Module):
     to continuous values, capturing localization uncertainty.
     """
     
+    # Declared as class attribute so type-checkers know the buffer is a Tensor.
+    weights: torch.Tensor
+
     def __init__(self, reg_max: int = 16):
         super().__init__()
         self.reg_max = reg_max
-        # Register weights as buffer for efficient computation
+        # Register bin-index weights as a non-trainable buffer so they move
+        # to the correct device automatically with .to(device).
         self.register_buffer('weights', torch.arange(reg_max, dtype=torch.float).view(1, 1, reg_max, 1))
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:

@@ -1,6 +1,29 @@
 """
-YOLOv11 Backbone - CSPDarknet with C3k2 and C2PSA
-Extracts multi-scale features from input images
+yolov11.backbone – CSPDarknet Feature Extractor
+================================================
+
+Implements the YOLOv11 backbone based on CSPDarknet with two key additions:
+
+* **C3k2** – a more efficient CSP bottleneck that replaces C2f from YOLOv8.
+* **C2PSA** – Cross-Stage Partial with Spatial Attention, applied at the
+  deepest feature level (P5) to capture long-range spatial dependencies.
+
+The backbone produces three multi-scale feature maps (P3, P4, P5) that are
+passed to the PANet neck for further fusion.
+
+Model scaling
+-------------
+All channel widths and block depths are scaled by two multipliers:
+
+=======  ================  ================
+Size     depth_multiplier  width_multiplier
+=======  ================  ================
+n (nano)       0.33              0.25
+s (small)      0.33              0.50
+m (medium)     0.67              0.75
+l (large)      1.00              1.00
+x (xlarge)     1.33              1.25
+=======  ================  ================
 """
 
 import torch
@@ -27,7 +50,17 @@ BASE_DEPTHS = [3, 6, 6, 3]
 
 
 def make_divisible(x: float, divisor: int = 8) -> int:
-    """Make number divisible by divisor."""
+    """Round *x* up to the nearest multiple of *divisor*.
+
+    Used to ensure all channel counts are hardware-friendly (multiples of 8).
+
+    Args:
+        x: Raw (unrounded) channel count.
+        divisor: Rounding granularity (default 8 for CUDA alignment).
+
+    Returns:
+        Smallest integer >= *x* that is divisible by *divisor*.
+    """
     return max(divisor, int(x + divisor / 2) // divisor * divisor)
 
 
@@ -104,7 +137,13 @@ class CSPDarknet(nn.Module):
         self._initialize_weights()
     
     def _initialize_weights(self):
-        """Initialize model weights."""
+        """Initialise Conv2d and BatchNorm2d weights.
+
+        * Conv2d weights: Kaiming Normal (fan_out, relu) – good default for
+          networks with ReLU/SiLU activations.
+        * Conv2d bias: zero-initialised (bias=False in most convs anyway).
+        * BatchNorm2d weight: 1, bias: 0 (identity at start of training).
+        """
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -144,7 +183,13 @@ class CSPDarknet(nn.Module):
         return p3, p4, p5
     
     def get_out_channels(self) -> List[int]:
-        """Get output channel sizes for P3, P4, P5."""
+        """Return the number of output channels for each scale [P3, P4, P5].
+
+        Used by the PANet neck to configure its input projections.
+
+        Returns:
+            List of three integers: ``[C_P3, C_P4, C_P5]``.
+        """
         return self.out_channels
 
 
