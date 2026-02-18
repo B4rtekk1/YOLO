@@ -9,7 +9,7 @@
 
 ### Video Inference (with object tracking)
 
-![DEMO](https://youtu.be/jeEYAiKPcH8)
+https://github.com/B4rtekk1/YOLO/blob/5ec9565717eb3d538d58c52c818ca8cd8153a6ee/output.mp4
 
 > *Real-time detection with FPS overlay and SimpleTracker smoothing.*  
 > Run with: `python inference.py --weights saves/last.pt --source film.mp4 --save output.mp4`
