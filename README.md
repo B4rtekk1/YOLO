@@ -89,7 +89,7 @@ YOLO/
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/yolov11.git
+git clone https://github.com/B4rtekk1/yolov11.git
 cd yolov11
 
 # Install dependencies
