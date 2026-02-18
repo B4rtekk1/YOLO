@@ -714,10 +714,23 @@ def run_video(
     writer = None
 
     if save_path:
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # type: ignore[attr-defined]
+        # Use H.264 (avc1) for .mp4 for better browser/player compatibility.
+        # Falls back to 'mp4v' if 'avc1' is unavailable on the system.
+        suffix = Path(save_path).suffix.lower()
+        if suffix == '.mp4':
+            fourcc = cv2.VideoWriter_fourcc(*'avc1')  # type: ignore[attr-defined]
+        else:
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # type: ignore[attr-defined]
+
         writer = cv2.VideoWriter(
             save_path, fourcc, reader.fps, (reader.width, reader.height)
         )
+        if not writer.isOpened() and suffix == '.mp4':
+            print("Warning: 'avc1' codec failed, falling back to 'mp4v'.")
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # type: ignore[attr-defined]
+            writer = cv2.VideoWriter(
+                save_path, fourcc, reader.fps, (reader.width, reader.height)
+            )
 
     tracker = SimpleTracker(iou_threshold=0.3, max_age=5, min_hits=2) if use_tracker else None
     if use_tracker:

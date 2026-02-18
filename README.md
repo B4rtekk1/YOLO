@@ -1,6 +1,6 @@
 # YOLOv11 — From Scratch in PyTorch
 
-> A complete, research-grade implementation of **YOLOv11** built entirely from scratch in PyTorch.  
+> A complete, research-grade implementation of **YOLOv11** with addons,  built entirely from scratch in PyTorch.  
 > Supports **detection**, **instance segmentation**, and **pose estimation** in a single unified codebase.
 
 ---
@@ -153,15 +153,36 @@ flowchart TB
     Neck --> Head
 ```
 
-### Model Variants
+## 📊 Validation Results
 
-| Model | Params | FLOPs | mAP50-95 (COCO) |
-|-------|--------|-------|-----------------|
-| YOLOv11n | 2.6M | 6.5G | ~39.5 |
-| YOLOv11s | 9.4M | 21.5G | ~47.0 |
-| YOLOv11m | 20.1M | 68G | ~51.5 |
-| YOLOv11l | 25.3M | 87G | ~53.4 |
-| YOLOv11x | 56.9M | 194G | ~54.7 |
+### COCO val2017 (5000 images)
+
+*Model **YOLOv11s** trained on 110k photos for **150 epochs** on an **NVIDIA H100** GPU. Results validated using `saves/last.pt` on COCO val2017.*
+
+```text
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.299
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.456      
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.317      
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.143      
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.324      
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.405      
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.277      
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.463      
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.494      
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.261      
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.546      
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.660      
+
+==================================================
+Results:
+  mAP50-95: 0.2993
+  mAP50:    0.4555
+  mAP75:    0.3172
+  mAP (S):  0.1428
+  mAP (M):  0.3243
+  mAP (L):  0.4055
+==================================================
+```
 
 ---
 
