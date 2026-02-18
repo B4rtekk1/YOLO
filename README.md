@@ -176,7 +176,7 @@ flowchart TB
 
 ### COCO val2017 (5000 images)
 
-*Model **YOLOv11s** trained on 110k photos for **150 epochs** on an **NVIDIA H100** GPU. Results validated using `saves/last.pt` on COCO val2017.*
+*Model **YOLOv11s** trained on 110k photos for **125 epochs** on an **NVIDIA H100** GPU. Results validated using `saves/last.pt` on COCO val2017.*
 
 ```text
  Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.299
