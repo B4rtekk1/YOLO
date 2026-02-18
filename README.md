@@ -128,32 +128,48 @@ flowchart TB
     end
 
     subgraph Backbone["BACKBONE — CSPDarknet"]
-        STEM[Stem Conv 3→ch₀]
+        STEM[Stem Conv 3x3 s=2]
         S1[Stage 1 · C3k2]
-        S2[Stage 2 · C3k2 → P3]
-        S3[Stage 3 · C3k2 → P4]
+        P3[Stage 2 · C3k2]
+        P4[Stage 3 · C3k2]
         S4[Stage 4 · C3k2 + SPPF]
-        PSA[C2PSA · Spatial Attention → P5]
-        STEM --> S1 --> S2 --> S3 --> S4 --> PSA
+        P5[C2PSA · Spatial Attention]
+        STEM --> S1 --> P3 --> P4 --> S4 --> P5
     end
 
-    subgraph Neck["NECK — PANet"]
-        FPN["FPN top-down · C3k2"]
-        PAN["PAN bottom-up · C3k2"]
-        FPN --> PAN
+    subgraph Neck["NECK — PANet (FPN + PAN)"]
+        FPN1[Upsample + C3k2]
+        FPN2[Upsample + C3k2]
+        PAN1[Conv s=2 + C3k2]
+        PAN2[Conv s=2 + C3k2]
+        
+        P5 -->|Top-Down| FPN1
+        P4 -->|Lateral| FPN1
+        FPN1 --> FPN2
+        P3 -->|Lateral| FPN2
+        
+        FPN2 -->|Bottom-Up| PAN1
+        FPN1 -->|Lateral| PAN1
+        PAN1 --> PAN2
+        P5 -->|Lateral| PAN2
     end
 
-    subgraph Head["HEAD — Decoupled Anchor-Free"]
-        CLS[Classification Branch]
-        REG[Regression Branch · DFL]
-        TASK[Task Branch · Masks / Keypoints]
+    subgraph Head["HEAD — Task Heads"]
+        DET[Detection Head]
+        SEG[Segmentation]
+        POSE[Pose Estimation]
     end
 
     IMG --> Backbone
-    S2 -->|P3 stride 8| Neck
-    S3 -->|P4 stride 16| Neck
-    PSA -->|P5 stride 32| Neck
-    Neck --> Head
+    FPN2 -->|Small| DET
+    PAN1 -->|Medium| DET
+    PAN2 -->|Large| DET
+    FPN2 -->|Small| SEG
+    PAN1 -->|Medium| SEG
+    PAN2 -->|Large| SEG
+    FPN2 -->|Small| POSE
+    PAN1 -->|Medium| POSE
+    PAN2 -->|Large| POSE
 ```
 
 ## 📊 Validation Results
