@@ -225,7 +225,3 @@ YOLO/
 This repository is licensed under the **MIT License**. See [LICENSE](LICENSE) for more details.
 
 ---
-
-<div align="center">
-Built by [B4rtekk1](https://github.com/B4rtekk1)
-</div>
