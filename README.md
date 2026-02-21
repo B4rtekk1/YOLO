@@ -130,7 +130,7 @@ python landscape.py --weights saves/last.pt --data coco_mini
 ```
 
 <div align="center">
-  <img src="loss_landscape_new.png" width="85%" alt="Loss Landscape Visualization" />
+  <img src="loss_landscape.png" width="85%" alt="Loss Landscape Visualization" />
   <p><i>Left: 3D Loss Surface | Right: Contour Mapping showing the optimization basin.</i></p>
 </div>
 
