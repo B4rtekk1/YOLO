@@ -57,6 +57,7 @@ This implementation features a suite of low-level optimizations designed to satu
 3. **📍 Pinned-Memory DMA**: Zero-copy host-to-device transfers using `pin_memory` buffers, allowing for non-blocking asynchronous data uploads.
 4. **🏗️ Static Geometry Tensors**: DFL weights and anchor grids are pre-calculated at model initialization, preventing expensive repetitive memory allocations during the hot inference loop.
 5. **⚡ Vectorized Visualization**: A high-speed drawing engine that utilizes NumPy slicing for label backgrounds, significantly outperforming standard per-box OpenCV draw calls.
+6. **💻 CPU Optimized Performance**: While engineered for GPUs, the model maintains high efficiency on standard CPUs, achieving up to **6 FPS**—making it viable for localized edge processing without hardware acceleration.
 
 ---
 
@@ -91,6 +92,9 @@ python inference.py --weights saves/last.pt --source video.mp4 --save output.mp4
 
 # Live webcam stream
 python inference.py --weights saves/last.pt --source 0
+
+# Run on CPU (achieves ~6 FPS)
+python inference.py --weights saves/last.pt --source input.jpg --device cpu
 ```
 
 ### 🏋️ Distributed Training
@@ -126,7 +130,7 @@ python landscape.py --weights saves/last.pt --data coco_mini
 ```
 
 <div align="center">
-  <img src="loss_landscape.png" width="85%" alt="Loss Landscape Visualization" />
+  <img src="loss_landscape_new.png" width="85%" alt="Loss Landscape Visualization" />
   <p><i>Left: 3D Loss Surface | Right: Contour Mapping showing the optimization basin.</i></p>
 </div>
 
