@@ -22,7 +22,7 @@
 
 Experience zero-latency inference with integrated skeleton tracking.
 
-<https://github.com/user-attachments/assets/c0706b07-8e98-41fe-820f-3fd9209eb861>
+https://github.com/user-attachments/assets/c7ed4e0d-96ab-4ea6-90fe-7c71f512421e
 
 > **Engineered for Speed:** View real-time FPS metrics and inference latency overlays.  
 > `python inference.py --weights saves/last.pt --source demo.mp4 --save output.mp4`
