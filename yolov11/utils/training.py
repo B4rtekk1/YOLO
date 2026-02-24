@@ -112,12 +112,14 @@ class WarmupScheduler:
         optimizer: torch.optim.Optimizer,
         warmup_epochs: int = 3,
         warmup_bias_lr: float = 0.1,
-        warmup_momentum: float = 0.8
+        warmup_momentum: float = 0.8,
+        start_epoch: int = 0
     ):
         self.optimizer = optimizer
         self.warmup_epochs = warmup_epochs
         self.warmup_bias_lr = warmup_bias_lr
         self.warmup_momentum = warmup_momentum
+        self.start_epoch = start_epoch
         
         # Store initial values
         self.base_lrs = [pg['lr'] for pg in optimizer.param_groups]
@@ -125,9 +127,10 @@ class WarmupScheduler:
     
     def step(self, epoch: float, batch_idx: int, num_batches: int):
         """Update learning rate based on warmup progress."""
-        if epoch < self.warmup_epochs:
+        relative_epoch = epoch - self.start_epoch
+        if 0 <= relative_epoch < self.warmup_epochs:
             # Linear warmup
-            progress = (epoch * num_batches + batch_idx) / (self.warmup_epochs * num_batches)
+            progress = (relative_epoch * num_batches + batch_idx) / (self.warmup_epochs * num_batches)
             
             for i, pg in enumerate(self.optimizer.param_groups):
                 pg['lr'] = self.base_lrs[i] * progress

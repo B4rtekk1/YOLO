@@ -29,7 +29,7 @@ import threading
 import queue
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 import sys
 
 import cv2
@@ -123,6 +123,14 @@ class YOLOv11Predictor:
         use_cuda = torch.cuda.is_available() and device != 'cpu'
         self.device = torch.device(f'cuda:{device}' if use_cuda else 'cpu')
         self._use_cuda = use_cuda
+        if use_cuda:
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            try:
+                torch.set_float32_matmul_precision('high')
+            except Exception:
+                pass
 
         # CUDA stream for async upload
         self._stream = torch.cuda.Stream() if use_cuda else None
@@ -193,9 +201,11 @@ class YOLOv11Predictor:
         # ---- Preprocessing helper ----
         self.letterbox = LetterBox((img_size, img_size))
 
-        # ---- Pinned host buffer (reused across frames) ----
-        # Allocated lazily on first frame to know the exact shape.
-        self._pinned_buf: Optional[torch.Tensor] = None
+        # ---- Pinned host buffer pool (reused across frames) ----
+        # Multiple slots avoid overwriting memory while async H2D copies are in flight.
+        self._pinned_pool_size = 4
+        self._pinned_pool: List[Optional[torch.Tensor]] = [None] * self._pinned_pool_size
+        self._pinned_idx = 0
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -212,6 +222,51 @@ class YOLOv11Predictor:
             print('FP16 (half precision) enabled.')
         else:
             self.half = False
+
+    def enable_compile(self, mode: str = 'reduce-overhead') -> None:
+        """Enable torch.compile for PyTorch weights when available."""
+        if self.format != '.pt':
+            print('torch.compile skipped (only for .pt models).')
+            return
+        if not hasattr(torch, 'compile'):
+            print('torch.compile is unavailable in this PyTorch build.')
+            return
+        try:
+            self.model = torch.compile(self.model, mode=mode)
+            print(f'torch.compile enabled (mode={mode}).')
+        except Exception as exc:
+            print(f'torch.compile failed, continuing without compile: {exc}')
+
+    @torch.inference_mode()
+    def warmup(self, iters: int = 10) -> None:
+        """Run a few dry iterations to stabilize runtime latency."""
+        if iters <= 0:
+            return
+
+        if self.format == '.pt':
+            dummy = torch.zeros(
+                1, 3, self.img_size, self.img_size,
+                device=self.device,
+                dtype=torch.float16 if self.half else torch.float32,
+            )
+            for _ in range(iters):
+                self.model(dummy)
+            if self._use_cuda:
+                torch.cuda.synchronize(self.device)
+        elif self.format == '.onnx':
+            dummy = np.zeros((1, 3, self.img_size, self.img_size), dtype=np.float32)
+            for _ in range(iters):
+                self.session.run(None, {self._ort_input_name: dummy})
+        elif self.format == '.engine':
+            dummy = torch.zeros(
+                1, 3, self.img_size, self.img_size,
+                device=self.device,
+                dtype=torch.float16 if self.half else torch.float32,
+            )
+            for _ in range(iters):
+                self.trt_model(dummy)
+
+        print(f'Warmup done ({iters} iterations).')
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -235,6 +290,14 @@ class YOLOv11Predictor:
     # Preprocessing  (hot path — optimised)
     # ------------------------------------------------------------------
 
+    def _preprocess_numpy(self, image: np.ndarray) -> np.ndarray:
+        """Letterbox + normalize + CHW on CPU. Returns float32 array (3,H,W)."""
+        img, _ = self.letterbox(image, {})
+        img = img[:, :, ::-1]  # BGR -> RGB
+        img = np.ascontiguousarray(img, dtype=np.float32)
+        img /= 255.0
+        return img.transpose(2, 0, 1)
+
     def preprocess(self, image: np.ndarray) -> torch.Tensor:
         """
         Letterbox → BGR→RGB → CHW float → GPU.
@@ -242,55 +305,72 @@ class YOLOv11Predictor:
         Uses a pinned host buffer and non-blocking transfer so the CPU
         can continue while the GPU DMA engine copies the tensor.
         """
-        img, _ = self.letterbox(image, {})
+        img = self._preprocess_numpy(image)
 
-        # In-place BGR→RGB by reversing the channel axis (no copy)
-        img = img[:, :, ::-1]
-
-        # Ensure C-contiguous layout required by torch.from_numpy
-        img = np.ascontiguousarray(img, dtype=np.float32)
-        img /= 255.0
-
-        # HWC → CHW
-        img = img.transpose(2, 0, 1)
-
-        # Reuse pinned buffer to avoid repeated page-locked allocation
-        if self._pinned_buf is None or self._pinned_buf.shape != img.shape:
-            self._pinned_buf = torch.empty(
-                img.shape, dtype=torch.float32, pin_memory=self._use_cuda
-            )
-        self._pinned_buf.copy_(torch.from_numpy(img))
+        # Reuse pinned buffer pool to avoid repeated page-locked allocations.
+        slot = self._pinned_idx
+        self._pinned_idx = (slot + 1) % self._pinned_pool_size
+        pinned = self._pinned_pool[slot]
+        if pinned is None or pinned.shape != img.shape:
+            pinned = torch.empty(img.shape, dtype=torch.float32, pin_memory=self._use_cuda)
+            self._pinned_pool[slot] = pinned
+        pinned.copy_(torch.from_numpy(img))
 
         # Non-blocking H→D transfer; overlaps with CPU work
-        tensor = self._pinned_buf.to(
+        tensor = pinned.to(
             self.device, non_blocking=True,
             dtype=torch.float16 if self.half else torch.float32,
         )
         return tensor.unsqueeze(0)  # (1, 3, H, W)
 
+    def preprocess_onnx(self, image: np.ndarray) -> np.ndarray:
+        """ONNX-friendly preprocessing (CPU float32 NCHW batch)."""
+        return np.expand_dims(self._preprocess_numpy(image), axis=0)
+
     # ------------------------------------------------------------------
     # Inference  (hot path)
     # ------------------------------------------------------------------
 
-    @torch.no_grad()
-    def predict(self, image: np.ndarray) -> dict:
-        """Run full inference pipeline on a single BGR image."""
-        h, w = image.shape[:2]
-        img = self.preprocess(image)
-
+    @torch.inference_mode()
+    def predict_from_preprocessed(
+        self,
+        prepared: Union[torch.Tensor, np.ndarray],
+        orig_hw: Tuple[int, int],
+    ) -> dict:
+        """Run inference + postprocess from an already preprocessed input."""
         if self.format == '.pt':
-            outputs = self.model(img)
+            outputs = self.model(prepared)  # type: ignore[arg-type]
         elif self.format == '.onnx':
-            # ONNX Runtime expects float32 on CPU
-            np_in = img.float().cpu().numpy()
+            np_in = (
+                prepared.astype(np.float32, copy=False)
+                if isinstance(prepared, np.ndarray)
+                else prepared.float().cpu().numpy()
+            )
             raw = self.session.run(None, {self._ort_input_name: np_in})
             outputs = [torch.from_numpy(x).to(self.device) for x in raw]
         elif self.format == '.engine':
-            outputs = [x.to(self.device) for x in self.trt_model(img)]
+            if isinstance(prepared, np.ndarray):
+                prepared = torch.from_numpy(prepared).to(
+                    self.device,
+                    dtype=torch.float16 if self.half else torch.float32,
+                    non_blocking=True,
+                )
+            outputs = [x.to(self.device) for x in self.trt_model(prepared)]
         else:
             raise ValueError(f'Cannot run prediction: unsupported format {self.format}')
 
-        return self._postprocess(outputs, orig_hw=(h, w))
+        return self._postprocess(outputs, orig_hw=orig_hw)
+
+    @torch.inference_mode()
+    def predict(self, image: np.ndarray) -> dict:
+        """Run full inference pipeline on a single BGR image."""
+        h, w = image.shape[:2]
+        prepared: Union[torch.Tensor, np.ndarray]
+        if self.format == '.onnx':
+            prepared = self.preprocess_onnx(image)
+        else:
+            prepared = self.preprocess(image)
+        return self.predict_from_preprocessed(prepared, orig_hw=(h, w))
 
     # ------------------------------------------------------------------
     # Postprocessing  (hot path — GPU-fused)
@@ -647,12 +727,15 @@ class FrameReader:
             if not ret:
                 self._q.put(None)  # sentinel
                 break
-            # Preprocess on the reader thread (CPU-bound) while GPU runs
-            tensor = self._predictor.preprocess(frame)
-            self._q.put((frame, tensor))
+            # Backend-aware preprocessing on the reader thread.
+            if self._predictor.format == '.onnx':
+                prepared: Any = self._predictor.preprocess_onnx(frame)
+            else:
+                prepared = self._predictor.preprocess(frame)
+            self._q.put((frame, prepared))
 
     def get(self, timeout: float = 5.0):
-        """Return (raw_frame, preprocessed_tensor) or None at end-of-stream."""
+        """Return (raw_frame, preprocessed_input) or None at end-of-stream."""
         return self._q.get(timeout=timeout)
 
     def release(self) -> None:
@@ -703,6 +786,8 @@ def run_video(
     source,
     save_path: Optional[str] = None,
     use_tracker: bool = True,
+    render: bool = True,
+    buffer_size: int = 4,
 ) -> None:
     """
     Run inference on video / webcam with double-buffered frame reading.
@@ -710,7 +795,7 @@ def run_video(
     The ``FrameReader`` thread reads + preprocesses the next frame while
     the GPU runs inference on the current one, hiding I/O latency.
     """
-    reader = FrameReader(source, predictor)
+    reader = FrameReader(source, predictor, buffer_size=buffer_size)
     writer = None
 
     if save_path:
@@ -735,7 +820,8 @@ def run_video(
     tracker = SimpleTracker(iou_threshold=0.3, max_age=5, min_hits=2) if use_tracker else None
     if use_tracker:
         print('Tracking enabled.')
-    print("Press 'q' to quit.")
+    if render:
+        print("Press 'q' to quit.")
 
     prev_t = time.perf_counter()
     frame_count = 0
@@ -746,16 +832,11 @@ def run_video(
             item = reader.get()
             if item is None:
                 break
-            frame, tensor = item
+            frame, prepared = item
 
             # ---- Inference (GPU) ----
             t0 = time.perf_counter()
-            with torch.no_grad():
-                outputs = predictor.model(tensor) if predictor.format == '.pt' else None
-                if outputs is None:
-                    results = predictor.predict(frame)
-                else:
-                    results = predictor._postprocess(outputs, orig_hw=frame.shape[:2])
+            results = predictor.predict_from_preprocessed(prepared, orig_hw=frame.shape[:2])
             inf_ms = (time.perf_counter() - t0) * 1000
             total_inf_ms += inf_ms
             frame_count += 1
@@ -773,26 +854,28 @@ def run_video(
             prev_t = curr_t
 
             # ---- Visualise ----
-            vis = visualize_predictions(frame, results, predictor.task, COCO_NAMES)
-            avg_inf = total_inf_ms / frame_count
-            cv2.putText(
-                vis,
-                f'FPS: {fps:.1f}  Inf: {inf_ms:.1f}ms  Avg: {avg_inf:.1f}ms',
-                (12, 36), cv2.FONT_HERSHEY_DUPLEX, 0.65, (0, 230, 0), 1, cv2.LINE_AA,
-            )
+            if writer or render:
+                vis = visualize_predictions(frame, results, predictor.task, COCO_NAMES)
+                avg_inf = total_inf_ms / frame_count
+                cv2.putText(
+                    vis,
+                    f'FPS: {fps:.1f}  Inf: {inf_ms:.1f}ms  Avg: {avg_inf:.1f}ms',
+                    (12, 36), cv2.FONT_HERSHEY_DUPLEX, 0.65, (0, 230, 0), 1, cv2.LINE_AA,
+                )
 
-            if writer:
-                writer.write(vis)
-            else:
-                cv2.imshow('YOLOv11 Inference', vis)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                if writer:
+                    writer.write(vis)
+                if render:
+                    cv2.imshow('YOLOv11 Inference', vis)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
 
     finally:
         reader.release()
         if writer:
             writer.release()
-        cv2.destroyAllWindows()
+        if render:
+            cv2.destroyAllWindows()
 
     if frame_count:
         print(
@@ -817,6 +900,10 @@ def main() -> None:
     parser.add_argument('--device',   type=str,   default='0',    help='GPU index or "cpu"')
     parser.add_argument('--save',     type=str,   default=None,   help='Output path')
     parser.add_argument('--half',     action='store_true',        help='FP16 inference (GPU only)')
+    parser.add_argument('--compile',  action='store_true',        help='Enable torch.compile for .pt weights')
+    parser.add_argument('--warmup',   type=int,   default=8,      help='Warmup iterations before timed inference')
+    parser.add_argument('--buffer-size', type=int, default=4,      help='Frame prefetch queue size for video')
+    parser.add_argument('--no-render', action='store_true',        help='Disable drawing/imshow for max FPS')
     parser.add_argument('--no-track', action='store_true',        help='Disable object tracking')
     parser.add_argument('--droidcam', action='store_true',        help='Use DroidCam stream')
     args = parser.parse_args()
@@ -834,6 +921,10 @@ def main() -> None:
     )
     if args.half:
         predictor.set_half(True)
+    if args.compile:
+        predictor.enable_compile()
+    if args.warmup > 0:
+        predictor.warmup(args.warmup)
 
     src = args.source
     is_video = (
@@ -842,7 +933,14 @@ def main() -> None:
         or src.endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm'))
     )
     if is_video:
-        run_video(predictor, src, args.save, use_tracker=not args.no_track)
+        run_video(
+            predictor,
+            src,
+            args.save,
+            use_tracker=not args.no_track,
+            render=not args.no_render,
+            buffer_size=max(1, args.buffer_size),
+        )
     else:
         run_image(predictor, src, args.save)
 

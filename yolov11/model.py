@@ -12,14 +12,15 @@ during ONNX/TorchScript export (to avoid Python dicts in traced graphs).
 
 ==========  ======================================================
 Task        Keys in output dict
-==========  ======================================================
+==========  =========================================================
 detect      ``cls`` (list), ``reg`` (list), ``strides`` (list)
-segment     ``cls``, ``reg``, ``mask``, ``proto``, ``strides``
-pose        ``cls``, ``reg``, ``kpt``, ``strides``
-==========  ======================================================
+segment     ``cls``, ``reg``, ``masks``, ``protos``, ``strides``
+pose        ``cls``, ``reg``, ``kpts``, ``strides``
+==========  =========================================================
 
-Each ``cls`` / ``reg`` / ``mask`` / ``kpt`` entry is a list of three tensors,
-one per detection scale (stride 8, 16, 32).
+Each ``cls`` / ``reg`` / ``masks`` / ``kpts`` entry is a list of three tensors,
+one per detection scale (stride 8, 16, 32). For backward compatibility, the
+singular aliases ``mask``/``proto``/``kpt`` are also returned.
 """
 
 import torch
@@ -154,8 +155,8 @@ class YOLOv11(nn.Module):
         Returns:
             Dictionary with task-specific outputs:
                 - detect: {'cls': [...], 'reg': [...]}
-                - segment: {'cls': [...], 'reg': [...], 'mask': [...], 'proto': Tensor}
-                - pose: {'cls': [...], 'reg': [...], 'kpt': [...]}
+                - segment: {'cls': [...], 'reg': [...], 'masks': [...], 'protos': Tensor}
+                - pose: {'cls': [...], 'reg': [...], 'kpts': [...]}
         """
         # Backbone
         features = self.backbone(x)
@@ -187,6 +188,9 @@ class YOLOv11(nn.Module):
             return {
                 'cls': cls_outputs,
                 'reg': reg_outputs,
+                'masks': mask_outputs,
+                'protos': protos,
+                # Backward-compatible aliases
                 'mask': mask_outputs,
                 'proto': protos,
                 'strides': self.strides
@@ -199,6 +203,8 @@ class YOLOv11(nn.Module):
             return {
                 'cls': cls_outputs,
                 'reg': reg_outputs,
+                'kpts': kpt_outputs,
+                # Backward-compatible alias
                 'kpt': kpt_outputs,
                 'strides': self.strides
             }
@@ -299,7 +305,7 @@ class YOLOv11(nn.Module):
         
         return fused_conv
     
-    def info(self, verbose: bool = True) -> Dict[str, any]:
+    def info(self, verbose: bool = True) -> Dict[str, Any]:
         """Print model information."""
         # Count parameters
         total_params = sum(p.numel() for p in self.parameters())
@@ -427,7 +433,12 @@ if __name__ == "__main__":
             print(f"  Outputs: {list(out.keys())}")
             for k, v in out.items():
                 if isinstance(v, list):
-                    print(f"    {k}: {[t.shape for t in v]}")
+                    if len(v) > 0 and all(isinstance(t, torch.Tensor) for t in v):
+                        print(f"    {k}: {[t.shape for t in v]}")
+                    else:
+                        print(f"    {k}: {v}")
                 elif isinstance(v, torch.Tensor):
                     print(f"    {k}: {v.shape}")
+                else:
+                    print(f"    {k}: {v}")
             print()

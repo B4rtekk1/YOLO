@@ -56,10 +56,8 @@ Module map
 * ``yolov11.utils``    – NMS, metrics, export, training helpers (EMA, schedulers).
 """
 
-from .model import YOLOv11, create_model
-from .backbone import CSPDarknet
-from .neck import PANet
-from .head import DetectionHead, SegmentationHead, PoseHead
+from importlib import import_module
+from typing import Any
 
 __version__ = "11.0.0"
 __all__ = [
@@ -71,3 +69,20 @@ __all__ = [
     "SegmentationHead", 
     "PoseHead"
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily expose top-level symbols without eager submodule imports."""
+    if name in {"YOLOv11", "create_model"}:
+        module = import_module(".model", __name__)
+        return getattr(module, name)
+    if name == "CSPDarknet":
+        module = import_module(".backbone", __name__)
+        return getattr(module, name)
+    if name == "PANet":
+        module = import_module(".neck", __name__)
+        return getattr(module, name)
+    if name in {"DetectionHead", "SegmentationHead", "PoseHead"}:
+        module = import_module(".head", __name__)
+        return getattr(module, name)
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")

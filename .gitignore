@@ -9,3 +9,5 @@ film.mp4
 *.engine
 *.ipynb
 yolov11.zip
+build
+dist

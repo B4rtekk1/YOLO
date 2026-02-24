@@ -256,6 +256,7 @@ def main():
     parser.add_argument('--copypaste', type=float, default=0.0, help='CopyPaste augmentation probability')
     parser.add_argument('--use-cbam', action='store_true', help='Use CBAM attention in backbone')
     parser.add_argument('--partial-load', action='store_true', help='Allow partial weight loading (for architecture changes)')
+    parser.add_argument('--reset-optimizer', action='store_true', help='Discard optimizer state and start fresh (useful when changing batch size)')
     parser.add_argument('--reset-lr', action='store_true', help='Reset learning rate when resuming (ignore saved optimizer LR)')
     args = parser.parse_args()
     
@@ -377,10 +378,11 @@ def main():
             base_model.load_state_dict(checkpoint['model_state_dict'])
             start_epoch = checkpoint['epoch'] + 1
             
-            if args.reset_lr:
-                # Don't load optimizer state - use fresh LR from args
+            if args.reset_optimizer or args.reset_lr:
+                # Don't load optimizer state - use fresh LR and empty momentum buffers
                 if rank in [-1, 0]:
-                    print(f'Resumed from epoch {start_epoch} with RESET learning rate: {args.lr}')
+                    status = "optimizer RESET" if args.reset_optimizer else "LR RESET"
+                    print(f'Resumed from epoch {start_epoch} with {status}: {args.lr}')
             else:
                 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                 if rank in [-1, 0]:
@@ -399,8 +401,9 @@ def main():
     if rank in [-1, 0]:
         print(f'EMA initialized with decay={args.ema_decay}')
     
-    # Initialize warmup scheduler
-    warmup = WarmupScheduler(optimizer, warmup_epochs=args.warmup_epochs)
+    # Initialize warmup scheduler (pass start_epoch if resetting optimizer for correct progress calculation)
+    warmup_start = start_epoch if (args.reset_optimizer or args.reset_lr) else 0
+    warmup = WarmupScheduler(optimizer, warmup_epochs=args.warmup_epochs, start_epoch=warmup_start)
     if rank in [-1, 0]:
         print(f'Warmup scheduled for {args.warmup_epochs} epochs')
     
@@ -439,9 +442,12 @@ def main():
         if distributed:
             train_loader.sampler.set_epoch(epoch)
             
+        # Determine warmup limit (relative to start_epoch if optimizer was reset)
+        warmup_limit = start_epoch + args.warmup_epochs if (args.reset_optimizer or args.reset_lr) else args.warmup_epochs
+        
         train_metrics = train_one_epoch(
             model, train_loader, criterion, optimizer, scaler, device, epoch,
-            warmup=warmup if epoch < args.warmup_epochs else None,
+            warmup=warmup if epoch < warmup_limit else None,
             ema=ema
         )
         
